@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- See com.example.pa-briefing-morning.plist for placeholder conventions. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.example.pa-slack-watcher</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/python3</string>
+    <string>__REPO_DIR__/scripts/slack_watcher.py</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__REPO_DIR__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>USER</key>
+    <string>__USER__</string>
+    <key>HOME</key>
+    <string>__HOME__</string>
+  </dict>
+
+  <!-- Every 10 minutes -->
+  <key>StartInterval</key>
+  <integer>600</integer>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__REPO_DIR__/briefings/slack_watcher.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__REPO_DIR__/briefings/slack_watcher.err.log</string>
+</dict>
+</plist>

@@ -1,0 +1,35 @@
+# Runtime output (never commit)
+briefings/
+drafts/
+archive/
+*.log
+
+# Watcher / bot state
+.mail_watch_state.json
+.slack_watch_state.json
+.telegram_state.json
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.local
+
+# Local Claude Code overrides
+.claude/settings.local.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# Editor
+.vscode/
+.idea/
+*.swp

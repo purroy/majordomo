@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 scripts/mail_fetch.py:*)",
+      "Bash(python3 scripts/mail_read.py:*)",
+      "Bash(bash scripts/keychain.sh has:*)",
+      "Bash(bash scripts/notify.sh:*)",
+      "Read",
+      "Glob",
+      "Grep",
+      "mcp__claude_ai_Google_Calendar__*",
+      "mcp__claude_ai_Google_Drive__*",
+      "mcp__claude_ai_Slack__*"
+    ]
+  }
+}

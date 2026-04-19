@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template. Substitute before installing:
+    __REPO_DIR__  absolute path to this repo       (e.g. /Users/you/code/pa)
+    __USER__      your login user                  (e.g. you)
+    __HOME__      your home directory              (e.g. /Users/you)
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.example.pa-briefing-morning</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__REPO_DIR__/scripts/run_briefing.sh</string>
+    <string>morning</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__REPO_DIR__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>USER</key>
+    <string>__USER__</string>
+    <key>HOME</key>
+    <string>__HOME__</string>
+  </dict>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>8</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>__REPO_DIR__/briefings/cron-morning.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__REPO_DIR__/briefings/cron-morning.err.log</string>
+</dict>
+</plist>
