@@ -12,7 +12,7 @@
 #
 # The cron timer at /etc/cron.daily/logrotate runs this automatically once a day.
 
-/home/pa/PA/briefings/*.log /home/pa/PA/briefings/*.out.log /home/pa/PA/briefings/*.err.log {
+/home/pa/PA/briefings/*.log {
     daily
     rotate 7
     maxsize 20M

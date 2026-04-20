@@ -131,8 +131,24 @@ IMAP_TIMEOUT_S = 30
 def imap_connect(cfg: MailConfig | None = None) -> imaplib.IMAP4_SSL:
     cfg = cfg or MailConfig.load()
     # Without timeout, a half-open TCP / stalled server hangs indefinitely
-    # and systemd has to SIGKILL the watcher.
-    conn = imaplib.IMAP4_SSL(cfg.imap_host, cfg.imap_port, timeout=IMAP_TIMEOUT_S)
+    # and systemd has to SIGKILL the watcher. imaplib.IMAP4_SSL accepts
+    # `timeout` only on Python 3.9+; on 3.8 (Ubuntu 20.04 default) we fall
+    # back to a process-wide socket default just for the connect call.
+    import sys as _sys
+    if _sys.version_info >= (3, 9):
+        conn = imaplib.IMAP4_SSL(cfg.imap_host, cfg.imap_port, timeout=IMAP_TIMEOUT_S)
+    else:
+        import socket as _socket
+        _prev = _socket.getdefaulttimeout()
+        _socket.setdefaulttimeout(IMAP_TIMEOUT_S)
+        try:
+            conn = imaplib.IMAP4_SSL(cfg.imap_host, cfg.imap_port)
+        finally:
+            _socket.setdefaulttimeout(_prev)
+        try:
+            conn.sock.settimeout(IMAP_TIMEOUT_S)
+        except Exception:
+            pass
     conn.login(cfg.user, cfg.password)
     return conn
 
