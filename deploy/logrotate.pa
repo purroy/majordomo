@@ -1,0 +1,25 @@
+# logrotate config for the PA briefings/ directory.
+#
+# The Python watchers do in-process rotation via watcher_base.Logger, but
+# briefings/{morning,evening,telegram_bot}.{out,err}.log are written by the
+# systemd wrapper (stdout/stderr redirects in run_briefing.sh and the bot
+# unit). Those need OS-level rotation.
+#
+# Install on the server as root:
+#   sudo cp deploy/logrotate.pa /etc/logrotate.d/pa
+#   sudo logrotate --debug /etc/logrotate.d/pa       # dry-run
+#   sudo logrotate --force /etc/logrotate.d/pa       # force one cycle
+#
+# The cron timer at /etc/cron.daily/logrotate runs this automatically once a day.
+
+/home/pa/PA/briefings/*.log /home/pa/PA/briefings/*.out.log /home/pa/PA/briefings/*.err.log {
+    daily
+    rotate 7
+    maxsize 20M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    su pa pa
+}

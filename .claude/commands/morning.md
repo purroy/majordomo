@@ -12,6 +12,14 @@ Before touching Slack or Calendar, make sure the tools are loaded. If not, call 
 select:mcp__claude_ai_Slack__slack_search_public,mcp__claude_ai_Slack__slack_search_public_and_private,mcp__claude_ai_Slack__slack_search_users,mcp__claude_ai_Slack__slack_read_channel,mcp__claude_ai_Google_Calendar__list_events
 ```
 
+## Step 0.5: resurface snoozed mail
+
+Run once at the start:
+```
+python3 scripts/mail_resurface.py
+```
+Its JSON output lists messages moved back to INBOX because their snooze date hit today. Use it to populate the "Resurfaced today" section below.
+
 ## Step 1: gather in parallel
 
 1. **Today's agenda** (Calendar MCP, `list_events`): use the owner's local timezone.
@@ -55,6 +63,10 @@ Exact format (no Markdown that Telegram cannot render — a converter runs after
 - HH:MM–HH:MM · Title · (location / attendees)
 ...
 (if empty: "No meetings scheduled.")
+
+## Resurfaced today (from snooze)
+- [account/UID] Sender — Subject · snoozed N days ago
+(Omit this section entirely if the resurface JSON's `resurfaced` is empty.)
 
 ## Mail (N unread total — <id1> A · <id2> B · ...)
 **Fire** (reply now):

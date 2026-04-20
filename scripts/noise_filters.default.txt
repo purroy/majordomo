@@ -1,0 +1,22 @@
+# Noise filters applied before the mail watcher calls Claude.
+# One regex per line (matched against the `From:` header). Lines starting
+# with `#` are ignored. Matches are case-insensitive.
+#
+# A matching message is NOT sent to Claude for triage: it's treated as noise
+# and its UID is silently advanced in the state file. The morning/evening
+# briefing still sees it (if unread) since those use a different code path.
+#
+# Override or extend per-deployment via `scripts/noise_filters.local.txt`
+# (gitignored). Both files are concatenated at runtime.
+
+# No-reply senders
+(?i)^.*<?\s*no[-_.]?reply@
+(?i)^.*<?\s*donotreply@
+(?i)^.*<?\s*notifications?@
+(?i)^.*<?\s*mailer-daemon@
+
+# Common marketing / newsletter prefixes
+(?i)^.*<?\s*newsletter@
+(?i)^.*<?\s*news@
+(?i)^.*<?\s*updates?@
+(?i)^.*<?\s*info@(mailchimp|sendgrid|hubspot|marketo)\.

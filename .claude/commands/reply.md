@@ -15,11 +15,11 @@ If no UID is given, ask or point to `/inbox`.
    python3 -c "import sys; sys.path.insert(0,'scripts'); from _mail import list_accounts; print(' '.join(list_accounts()))"
    ```
 
-2. **Read the original**:
+2. **Read the original + thread context**:
    ```
-   python3 scripts/mail_read.py <UID> --account <ID>
+   python3 scripts/mail_read.py <UID> --account <ID> --with-thread
    ```
-   Detect the body language (ignoring signature and quoted text).
+   The JSON includes a `thread` array with prior messages (oldest first) sharing `References`/`In-Reply-To`. Use them to avoid asking questions the thread already answered. Detect the body language (ignoring signature and quoted text).
 
 3. **Draft IN THE LANGUAGE OF THE ORIGINAL**. Follow the owner's personal style file in the memory dir (e.g. `memory/writing_style.md`). Professional and direct, no empty filler, short.
    - **By default DO NOT add a signature** — most MUAs append an HTML signature on send.

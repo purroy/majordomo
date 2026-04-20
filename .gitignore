@@ -8,6 +8,14 @@ archive/
 .mail_watch_state.json
 .slack_watch_state.json
 .telegram_state.json
+.pa_snooze.json
+*.json.tmp
+
+# Log rotation artefacts from watcher_base.Logger
+briefings/*.log.[0-9]*
+
+# Per-deployment noise filter overlay
+scripts/noise_filters.local.txt
 
 # Secrets
 .env

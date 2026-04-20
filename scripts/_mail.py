@@ -125,9 +125,14 @@ class MailConfig:
         )
 
 
+IMAP_TIMEOUT_S = 30
+
+
 def imap_connect(cfg: MailConfig | None = None) -> imaplib.IMAP4_SSL:
     cfg = cfg or MailConfig.load()
-    conn = imaplib.IMAP4_SSL(cfg.imap_host, cfg.imap_port)
+    # Without timeout, a half-open TCP / stalled server hangs indefinitely
+    # and systemd has to SIGKILL the watcher.
+    conn = imaplib.IMAP4_SSL(cfg.imap_host, cfg.imap_port, timeout=IMAP_TIMEOUT_S)
     conn.login(cfg.user, cfg.password)
     return conn
 
