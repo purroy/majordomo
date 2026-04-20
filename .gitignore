@@ -17,6 +17,7 @@ archive/
 
 # Local Claude Code overrides
 .claude/settings.local.json
+CLAUDE.local.md
 
 # Python
 __pycache__/
