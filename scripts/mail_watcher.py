@@ -297,8 +297,23 @@ def main() -> int:
         log(f"triaged {len(all_new)} new mails: nothing important")
         return 0
 
-    log(f"sending to telegram ({len(output)} chars, {output.count(chr(10))+1} lines)")
-    push_to_telegram(f"Mail - something for you\n\n{output}", log=log)
+    lines = [l for l in output.splitlines() if l.strip()]
+    urgent = [l for l in lines if l.startswith("FIRE") or l.startswith("SUSPICIOUS")]
+    important = [l for l in lines if l.startswith("IMPORTANT")]
+
+    if urgent:
+        push_text = "\n".join(urgent)
+        log(f"sending {len(urgent)} urgent to telegram")
+        push_to_telegram(f"Mail\n\n{push_text}", log=log)
+    else:
+        log(f"no urgent items (FIRE/SUSPICIOUS)")
+
+    if important:
+        pending = state.setdefault("pending_important", [])
+        pending.extend(important)
+        atomic_write_json(STATE, state)
+        log(f"queued {len(important)} IMPORTANT for 4h summary")
+
     return 0
 
 
