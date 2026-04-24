@@ -9,7 +9,11 @@ archive/
 .slack_watch_state.json
 .telegram_state.json
 .pa_snooze.json
+.goals_watch_state.json
 *.json.tmp
+
+# Personal goals file (EOS tracker). Use goals.example.md as template.
+goals.local.md
 
 # Log rotation artefacts from watcher_base.Logger
 briefings/*.log.[0-9]*

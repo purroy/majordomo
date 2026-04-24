@@ -50,9 +50,29 @@ Professional and direct. Short sentences. No emojis unless the original uses the
 - Morning: today's agenda + unread mail last 24h + pending Slack + suggested priorities.
 - Evening: what was sent/handled today + open threads + reminders for tomorrow.
 
+**Goals / EOS / rocks / objetivos:**
+When the owner asks about goals, objectives, rocks, EOS, monthly commitments, annual goals, upsell/revenue targets, the Wharton program, US trip, or Q2 plans — in any language — the answer is NOT "no tengo nada en memoria". The tracker lives at `goals.local.md` (gitignored, not always mentioned explicitly by the owner). Always:
+1. Run `python3 scripts/goals.py list` (or `check` / `next` for focused views) to read current state from disk.
+2. Use that output to answer. If the file is missing, tell the owner to copy `goals.example.md` → `goals.local.md` and populate it.
+3. For mutations (`done`, `update --progress`, `note`, `revenue`) — act directly on unambiguous matches, ask on ambiguity. See `.claude/commands/goals.md`.
+4. Data is personal and local. Never copy it into external tools (uploads, pastebins, third-party APIs).
+
+Under the hood: `scripts/goals.py` (CLI), `scripts/goals_watcher.py` (Telegram nudges: Monday check-in, Friday retro, deadlines, revenue, quarter end). `/morning` and `/evening` include goals sections automatically when the file is present.
+
 ## Repo conventions
 
 - Unsent drafts → `drafts/` (gitignored).
 - Briefings → `briefings/YYYY-MM-DD-{morning,evening}.md` (gitignored).
 - No credentials in the repo. Keychain on macOS, `.env` on Linux.
 - No Python dependencies: the mail client uses stdlib only.
+
+## Environments
+
+The PA runs in two places. Always consider which one you're in before acting.
+
+- **Mac dev** — `/Users/josep/Dev/PA`, user `josep`. Where Josep edits code interactively. Secrets in macOS Keychain. launchd templates in `scripts/launchd/` (Mac-only).
+- **Prod server** — `mail.kiwop.com` (Ubuntu 20.04, hostname `ns3088656`), repo at `/home/pa/PA`, runtime user `pa`. Secrets in `/home/pa/PA/.env` (mode 0600). Services managed by systemd: `pa-telegram-bot.service` (bot daemon), `pa-briefing-{morning,evening}.timer`, `pa-mail-watcher.timer`, `pa-slack-watcher.timer`, `pa-cli-update.timer`. Cron: `mail_summary.py` every 4h.
+
+Code flows Mac → GitHub → server (git pull). Private data (`goals.local.md`, memory files) do NOT go through git — they're scp'd manually to the server. The server's Claude memory lives at `/home/pa/.claude/projects/-home-pa-PA/memory/` (different slug from Mac's).
+
+After changing CLAUDE.md or scripts invoked by the bot on the server: `sudo systemctl restart pa-telegram-bot.service` so the bot picks them up on the next message. The bot spawns a fresh `claude -p` per message, so no in-memory state survives anyway — but logs keep streaming.

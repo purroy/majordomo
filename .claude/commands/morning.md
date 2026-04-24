@@ -20,6 +20,15 @@ python3 scripts/mail_resurface.py
 ```
 Its JSON output lists messages moved back to INBOX because their snooze date hit today. Use it to populate the "Resurfaced today" section below.
 
+## Step 0.6: load goals state
+
+If `goals.local.md` exists at the repo root:
+```
+python3 scripts/goals.py check --json
+python3 scripts/goals.py next --json
+```
+Use both to populate the "Rocks & commitments" section. If `goals.local.md` is missing, skip the section silently (no error).
+
 ## Step 1: gather in parallel
 
 1. **Today's agenda** (Calendar MCP, `list_events`): use the owner's local timezone.
@@ -84,6 +93,12 @@ Use `[account/UID]` so `/reply UID account` works directly.
 **Fire** ...
 **Important** ...
 (if empty: "No pending Slack.")
+
+## Rocks & commitments
+**Overdue:** <items from `check.overdue`, or "none">
+**Due this week:** <items from `check.due_soon` + `next` filtered to ≤7 days>
+**Focus rock:** <one rock to push today — pick the Q2 rock with the least progress or the one tied to a due_soon commitment>
+(Omit this section entirely if goals.local.md is missing.)
 
 ## Suggested priorities
 1. ...

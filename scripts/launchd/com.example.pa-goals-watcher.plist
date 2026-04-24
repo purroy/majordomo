@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template. Substitute before installing:
+    __REPO_DIR__  absolute path to this repo       (e.g. /Users/you/code/pa)
+    __USER__      your login user                  (e.g. you)
+    __HOME__      your home directory              (e.g. /Users/you)
+
+  Fires 3 times a day. The script decides per-tick whether to push a Monday
+  check-in (09:00 window), a Friday retro (18:00 window), a revenue nudge
+  (from day 3 of the month), a quarter-closing nudge, and deadline alerts
+  (every tick — dedup'd by .goals_watch_state.json).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.example.pa-goals-watcher</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>__REPO_DIR__/scripts/goals_watcher.py</string>
+    <string>--once</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__REPO_DIR__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>USER</key>
+    <string>__USER__</string>
+    <key>HOME</key>
+    <string>__HOME__</string>
+  </dict>
+
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict>
+      <key>Hour</key><integer>9</integer>
+      <key>Minute</key><integer>0</integer>
+    </dict>
+    <dict>
+      <key>Hour</key><integer>12</integer>
+      <key>Minute</key><integer>30</integer>
+    </dict>
+    <dict>
+      <key>Hour</key><integer>18</integer>
+      <key>Minute</key><integer>0</integer>
+    </dict>
+  </array>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>__REPO_DIR__/briefings/goals-watcher.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__REPO_DIR__/briefings/goals-watcher.err.log</string>
+</dict>
+</plist>

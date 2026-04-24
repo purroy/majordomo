@@ -30,6 +30,12 @@ select:mcp__claude_ai_Slack__slack_search_public_and_private,mcp__claude_ai_Slac
    Read each with `mail_read.py UID --account <ID>` and classify with `memory/triage_rules.md`. **Do not mark as read.**
 5. **Slack**: messages received by the owner since yesterday 19:00 (`to:<@USER_ID> after:<date>`).
 6. **Tomorrow's agenda**.
+7. **Goals state** (if `goals.local.md` exists):
+   ```
+   python3 scripts/goals.py check --json
+   python3 scripts/goals.py list --json
+   ```
+   Use both to produce the "Rocks recap" section (done_log entries from today + open rocks without fresh progress).
 
 ## Step 2: output
 
@@ -55,6 +61,12 @@ M pending Slack messages.
   1. ...
   2. ...
   3. ...
+
+## Rocks recap
+**Done today (from done_log):** <items with date == today>
+**Rocks still without progress:** <stale_rocks from check>
+**Suggestion:** "Want to mark anything done or update a rock's progress before closing?"
+(Omit this section entirely if goals.local.md is missing.)
 ```
 
 ## Hard rules
