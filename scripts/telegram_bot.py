@@ -125,23 +125,28 @@ def reset_session(state: dict, chat_id: int) -> None:
     state.get("chats", {}).pop(str(chat_id), None)
 
 
-def ask_claude(prompt: str, session_id: str) -> str:
-    """Invoke claude --print, continuing the chat's persistent session.
+def ask_claude(prompt: str, session_id: str, is_new: bool) -> str:
+    """Invoke claude --print, creating or resuming the chat's session.
 
     Default model: Sonnet (cheaper, fine for triage / short questions).
     If the prompt starts with `!opus ` Opus is used instead.
 
-    Session continuity: same session_id across messages reuses the prior
-    transcript. `--no-session-persistence` is OFF so claude writes the
-    session to its on-disk store between calls.
+    Session continuity: `--session-id <id>` is a CREATE-only flag — the id
+    cannot be reused for a second invocation. To continue, use
+    `--resume <id>`. So:
+      - First message of a chat (is_new=True): --session-id <new-uuid>
+      - Subsequent messages:                   --resume <same-uuid>
+    `--no-session-persistence` stays OFF so claude writes the transcript
+    between invocations.
     """
     use_opus = prompt.startswith("!opus ")
     if use_opus:
         prompt = prompt[len("!opus "):]
+    session_flag = ["--session-id", session_id] if is_new else ["--resume", session_id]
     cmd = [
         "claude", "--print",
         "--model", "opus" if use_opus else "sonnet",
-        "--session-id", session_id,
+        *session_flag,
         "--setting-sources", "project,user",
         "--output-format", "text",
         "--permission-mode", "bypassPermissions",
@@ -235,7 +240,7 @@ def main() -> int:
             atomic_write_json(STATE, state)  # persist new session_id before the call
             log(f"<- [{'NEW' if is_new else 'CONT'} {session_id[:8]}] {text[:200]}")
             send_typing(token, chat_id)
-            reply = ask_claude(text, session_id)
+            reply = ask_claude(text, session_id, is_new)
             log(f"-> {reply[:200]}")
             # Telegram does not render GitHub-flavoured markdown; flatten.
             delivered = send_message(token, chat_id, md_to_text(reply))
