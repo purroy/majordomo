@@ -25,7 +25,7 @@ Professional and direct. Short sentences. No emojis unless the original uses the
 - **Mail** — `scripts/mail_fetch.py`, `mail_read.py`, `mail_send.py`, `mail_flag.py`. Credentials in macOS Keychain (`PA-mail-<account>-*`) or `.env` (`PA_MAIL_<ACCOUNT>_*`).
 - **Calendar / Drive / Slack** — via MCP connectors (`mcp__claude_ai_Google_Calendar__*`, `..._Google_Drive__*`, `..._Slack__*`). If they fail with "not authenticated", run the `__authenticate` flow.
 - **Notifications** — `scripts/notify.sh "Title" "Message"` (macOS `osascript`; stderr fallback elsewhere).
-- **Telegram** — `scripts/telegram_send.sh "text"` pushes to the owner's private PA chat. The `scripts/telegram_bot.py` daemon receives messages and forwards them to `claude -p` with a fresh session. When invoked from Telegram you may see short prompts with no prior context; reply appropriately.
+- **Telegram** — `scripts/telegram_send.sh "text"` pushes to the owner's private PA chat. The `scripts/telegram_bot.py` daemon receives messages and forwards them to `claude -p`. Sessions are persistent per chat with a 24h TTL: messages within that window share one session, so the bot remembers the running conversation. After 24h of silence (or `/reset`) the next message starts a fresh session. Don't tell the owner "I have no prior context" without checking — within the TTL, you actually do.
 - **Persistent memory** — at `~/.claude/projects/<slug>/memory/`. Store things that should persist across conversations (signatures, triage rules, contact priorities, preferences).
 
 ## Typical flows

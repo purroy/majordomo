@@ -4,13 +4,18 @@
 Reads `PA-telegram-bot-token` and `PA-telegram-chat-id` via `get_secret`
 (env var on Linux/Docker, macOS Keychain otherwise).
 
-Only responds to the whitelisted chat_id. Each message is an independent
-call to `claude --print` (ephemeral session-id) - no conversation memory
-between messages; persistent PA memory in `~/.claude/projects/.../memory/`
-is still available.
+Only responds to the whitelisted chat_id. Conversations are persistent
+per chat: messages within a 24-hour window share a single Claude session,
+so the bot remembers what was just discussed. After 24h of silence, the
+next message starts a fresh session. `/reset` forces a new session
+immediately.
+
+Per-chat state lives in .telegram_state.json under `chats[chat_id]`:
+  { session_id, last_at } (epoch seconds).
 
 Special commands (not forwarded to Claude):
   /ping    - immediate "pong" reply.
+  /reset   - drop the current session id; next message starts fresh.
 
 Runs via systemd (Linux) or launchd (macOS), or directly:
   python3 scripts/telegram_bot.py
@@ -44,6 +49,11 @@ POLL_TIMEOUT_S = 50
 HTTP_TIMEOUT_S = POLL_TIMEOUT_S + 15
 CLAUDE_TIMEOUT_S = 600
 CHUNK = 4000  # Telegram message hard limit is 4096
+
+# Conversation persistence: reuse the same claude session for a chat
+# while messages are within this window. Past it, the next message
+# rolls over to a fresh session_id (avoids unbounded context growth).
+SESSION_TTL_S = 24 * 3600
 
 # Exponential backoff caps for network failures against the Telegram API.
 BACKOFF_START_S = 5
@@ -88,11 +98,42 @@ def send_typing(token: str, chat_id: int) -> None:
         pass
 
 
-def ask_claude(prompt: str) -> str:
-    """Invoke claude --print with a fresh ephemeral session per message.
+def session_for_chat(state: dict, chat_id: int) -> tuple[str, bool]:
+    """Return (session_id, is_new) for this chat, rotating on TTL.
+
+    Mutates state in-place; caller is responsible for persisting it.
+    """
+    chats = state.setdefault("chats", {})
+    key = str(chat_id)
+    entry = chats.get(key)
+    now = int(time.time())
+    if entry and now - int(entry.get("last_at", 0)) <= SESSION_TTL_S and entry.get("session_id"):
+        return entry["session_id"], False
+    new_id = str(uuid.uuid4())
+    chats[key] = {"session_id": new_id, "last_at": now}
+    return new_id, True
+
+
+def touch_session(state: dict, chat_id: int) -> None:
+    """Update last_at after a successful exchange."""
+    entry = state.get("chats", {}).get(str(chat_id))
+    if entry:
+        entry["last_at"] = int(time.time())
+
+
+def reset_session(state: dict, chat_id: int) -> None:
+    state.get("chats", {}).pop(str(chat_id), None)
+
+
+def ask_claude(prompt: str, session_id: str) -> str:
+    """Invoke claude --print, continuing the chat's persistent session.
 
     Default model: Sonnet (cheaper, fine for triage / short questions).
     If the prompt starts with `!opus ` Opus is used instead.
+
+    Session continuity: same session_id across messages reuses the prior
+    transcript. `--no-session-persistence` is OFF so claude writes the
+    session to its on-disk store between calls.
     """
     use_opus = prompt.startswith("!opus ")
     if use_opus:
@@ -100,8 +141,7 @@ def ask_claude(prompt: str) -> str:
     cmd = [
         "claude", "--print",
         "--model", "opus" if use_opus else "sonnet",
-        "--session-id", str(uuid.uuid4()),
-        "--no-session-persistence",
+        "--session-id", session_id,
         "--setting-sources", "project,user",
         "--output-format", "text",
         "--permission-mode", "bypassPermissions",
@@ -130,8 +170,9 @@ def main() -> int:
         log(f"FATAL: secret read failed: {e}")
         return 2
 
-    state = load_json(STATE, {"offset": 0})
-    log(f"Bot up. Allowed chat={allowed_chat} (ephemeral session per message)")
+    state = load_json(STATE, {"offset": 0, "chats": {}})
+    state.setdefault("chats", {})
+    log(f"Bot up. Allowed chat={allowed_chat} (persistent session, TTL {SESSION_TTL_S//3600}h)")
 
     backoff = BACKOFF_START_S
 
@@ -182,13 +223,24 @@ def main() -> int:
                     atomic_write_json(STATE, state)
                 continue
 
-            log(f"<- {text[:200]}")
+            if text == "/reset":
+                reset_session(state, chat_id)
+                state["offset"] = update_id
+                atomic_write_json(STATE, state)
+                send_message(token, chat_id, "Sesión reiniciada. El próximo mensaje empieza de cero.")
+                log(f"session reset for chat {chat_id}")
+                continue
+
+            session_id, is_new = session_for_chat(state, chat_id)
+            atomic_write_json(STATE, state)  # persist new session_id before the call
+            log(f"<- [{'NEW' if is_new else 'CONT'} {session_id[:8]}] {text[:200]}")
             send_typing(token, chat_id)
-            reply = ask_claude(text)
+            reply = ask_claude(text, session_id)
             log(f"-> {reply[:200]}")
             # Telegram does not render GitHub-flavoured markdown; flatten.
             delivered = send_message(token, chat_id, md_to_text(reply))
             if delivered:
+                touch_session(state, chat_id)
                 state["offset"] = update_id
                 atomic_write_json(STATE, state)
             else:
