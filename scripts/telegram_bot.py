@@ -10,6 +10,12 @@ so the bot remembers what was just discussed. After 24h of silence, the
 next message starts a fresh session. `/reset` forces a new session
 immediately.
 
+Voice / audio messages are downloaded, transcribed locally with
+whisper.cpp via scripts/transcribe.py, and the resulting text is fed
+into the same conversational flow as a regular text message. The user
+sees a short "(audio: <transcript>)" preview followed by the bot's
+reply, so they can spot misrecognitions.
+
 Per-chat state lives in .telegram_state.json under `chats[chat_id]`:
   { session_id, last_at } (epoch seconds).
 
@@ -25,6 +31,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -70,6 +77,47 @@ def tg(token: str, method: str, params: dict | None = None,
         req = urllib.request.Request(url)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.load(r)
+
+
+# --- Voice / audio handling ------------------------------------------------
+
+# message keys Telegram uses for audio-bearing payloads, in priority order.
+# `voice` = recorded voice note (.oga). `audio` = music/audio file.
+# `video_note` = circular video; the audio track is extracted by ffmpeg.
+AUDIO_KEYS = ("voice", "audio", "video_note")
+TRANSCRIBE_PY = REPO_DIR / "scripts" / "transcribe.py"
+
+
+def find_audio(msg: dict) -> tuple[str, dict] | None:
+    for k in AUDIO_KEYS:
+        v = msg.get(k)
+        if v and v.get("file_id"):
+            return k, v
+    return None
+
+
+def download_telegram_file(token: str, file_id: str, dst: Path) -> None:
+    info = tg(token, "getFile", {"file_id": file_id}, timeout=30)
+    if not info.get("ok"):
+        raise RuntimeError(f"getFile failed: {info}")
+    file_path = info["result"]["file_path"]
+    url = f"https://api.telegram.org/file/bot{token}/{file_path}"
+    with urllib.request.urlopen(url, timeout=120) as r, open(dst, "wb") as fh:
+        while chunk := r.read(64 * 1024):
+            fh.write(chunk)
+
+
+def transcribe_audio(audio_path: Path) -> str:
+    """Run scripts/transcribe.py and return the recognised text."""
+    res = subprocess.run(
+        ["python3", str(TRANSCRIBE_PY), str(audio_path), "auto"],
+        capture_output=True, text=True, timeout=600,
+    )
+    if res.returncode != 0:
+        raise RuntimeError(
+            f"transcribe rc={res.returncode}: {res.stderr.strip()[:300]}"
+        )
+    return res.stdout.strip()
 
 
 def send_message(token: str, chat_id: int, text: str,
@@ -217,10 +265,48 @@ def main() -> int:
                 state["offset"] = update_id
                 atomic_write_json(STATE, state)
                 continue
+
+            # Voice / audio / video_note: download, transcribe, treat as text.
             if not text:
-                state["offset"] = update_id
-                atomic_write_json(STATE, state)
-                continue
+                audio = find_audio(msg)
+                if audio:
+                    kind, payload = audio
+                    file_id = payload["file_id"]
+                    duration = payload.get("duration", "?")
+                    mime = payload.get("mime_type", "")
+                    log(f"<- [audio:{kind} dur={duration}s mime={mime}] file_id={file_id}")
+                    send_typing(token, chat_id)
+                    try:
+                        suffix = "." + (mime.split("/")[-1] if "/" in mime else "ogg")
+                        with tempfile.NamedTemporaryFile(prefix="pa-tg-", suffix=suffix, delete=False) as fh:
+                            tmp_audio = Path(fh.name)
+                        try:
+                            download_telegram_file(token, file_id, tmp_audio)
+                            text = transcribe_audio(tmp_audio)
+                        finally:
+                            try:
+                                tmp_audio.unlink()
+                            except OSError:
+                                pass
+                    except Exception as e:
+                        log(f"transcription failed: {e}")
+                        send_message(token, chat_id,
+                                     f"⚠ No pude transcribir el audio: {str(e)[:200]}")
+                        state["offset"] = update_id
+                        atomic_write_json(STATE, state)
+                        continue
+                    if not text:
+                        send_message(token, chat_id,
+                                     "⚠ El audio se transcribió vacío. Prueba a hablar más alto o más cerca.")
+                        state["offset"] = update_id
+                        atomic_write_json(STATE, state)
+                        continue
+                    log(f"transcribed: {text[:200]}")
+                    send_message(token, chat_id, f"(audio) {text}")
+                else:
+                    state["offset"] = update_id
+                    atomic_write_json(STATE, state)
+                    continue
 
             if text == "/ping":
                 if send_message(token, chat_id, "pong"):
