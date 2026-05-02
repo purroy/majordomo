@@ -146,8 +146,12 @@ def send_typing(token: str, chat_id: int) -> None:
         pass
 
 
-def session_for_chat(state: dict, chat_id: int) -> tuple[str, bool]:
-    """Return (session_id, is_new) for this chat, rotating on TTL.
+def session_for_chat(state: dict, chat_id: int) -> tuple[str, bool, str | None]:
+    """Return (session_id, is_new, expired_session_id) for this chat.
+
+    Rotates on TTL. `expired_session_id` is the previous session_id when
+    rotation happened due to TTL expiry (not first-ever message and not
+    after /reset) — it's the signal for the memory-distill hook.
 
     Mutates state in-place; caller is responsible for persisting it.
     """
@@ -156,10 +160,11 @@ def session_for_chat(state: dict, chat_id: int) -> tuple[str, bool]:
     entry = chats.get(key)
     now = int(time.time())
     if entry and now - int(entry.get("last_at", 0)) <= SESSION_TTL_S and entry.get("session_id"):
-        return entry["session_id"], False
+        return entry["session_id"], False, None
+    expired = entry.get("session_id") if entry else None
     new_id = str(uuid.uuid4())
     chats[key] = {"session_id": new_id, "last_at": now}
-    return new_id, True
+    return new_id, True, expired
 
 
 def touch_session(state: dict, chat_id: int) -> None:
@@ -171,6 +176,72 @@ def touch_session(state: dict, chat_id: int) -> None:
 
 def reset_session(state: dict, chat_id: int) -> None:
     state.get("chats", {}).pop(str(chat_id), None)
+
+
+# --- Memory-distill hook (TTL rollover) ------------------------------------
+
+DISTILL_LOG = REPO_DIR / "briefings" / "telegram_distill.log"
+
+# Prompt para el subproceso de extracción. Se inyecta como un nuevo turno
+# de usuario en la sesión expirada (--resume). El modelo ve TODO el historial
+# de la conversación que acaba de morir y aplica las reglas de auto-memoria
+# que ya tiene en su system prompt (el harness de Claude Code las inyecta).
+#
+# El objetivo es cubrir el agujero estructural: dentro de UNA sesión de 24h,
+# una rutina con cadencia >24h sólo aparece una vez y nunca parece "recurrente"
+# para Sonnet. Este hook le da una pasada explícita al cerrar la sesión, con
+# la instrucción inequívoca de mirar lo de los últimos días via memoria + git.
+DISTILL_PROMPT = """Esta sesión va a cerrarse por inactividad (>24h sin mensajes). Antes de descartarla, repasa TODO el transcript de esta conversación con ojo de auto-memoria.
+
+Aplica estrictamente las reglas del sistema de memoria que ya tienes en tu system prompt. En particular:
+- Rutinas / actividades recurrentes del usuario (vocabulario, repaso, hábitos, deportes, lectura, lo que sea) → memoria tipo `user` o `project`, indicando dónde vive el estado real (archivo, herramienta) si lo hay.
+- Preferencias confirmadas (de palabra o por aceptación implícita: el usuario aprobó algo no obvio) → memoria tipo `feedback` con **Why:** y **How to apply:**.
+- Decisiones, contactos, datos del proyecto que no se derivan de leer el código → `project`.
+- Punteros a sistemas externos mencionados → `reference`.
+
+Antes de escribir, comprueba si ya existe una memoria parecida — actualiza en lugar de duplicar. NO escribas nada que sea trivial, derivable del repo, o ya esté cubierto por CLAUDE.md.
+
+Importante:
+- NO respondas al usuario. NO mandes Telegram. NO ejecutes herramientas que toquen mail, calendar o slack.
+- Sólo Read/Write/Edit/Grep/Bash de lectura sobre el directorio de memoria. Si decides no guardar nada, está bien.
+
+Output (a stdout, lo recoge el log del bot):
+- Una línea por memoria creada o actualizada: `CREATE <file> — <razón>` o `UPDATE <file> — <razón>`.
+- Si no hay nada que merezca guardarse: la palabra `NONE`.
+"""
+
+
+def kickoff_memory_distill(prev_session_id: str) -> None:
+    """Lanza en background `claude -p --resume <prev>` con el prompt de extracción.
+
+    Non-blocking: el usuario no espera. Output redirigido a un log dedicado.
+    Si el binario `claude` no está, falla en silencio (logueado).
+    """
+    try:
+        DISTILL_LOG.parent.mkdir(exist_ok=True)
+        fh = open(DISTILL_LOG, "ab")
+        fh.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} distill session={prev_session_id} ===\n".encode())
+        fh.flush()
+        subprocess.Popen(
+            [
+                "claude", "--print",
+                "--model", "sonnet",
+                "--resume", prev_session_id,
+                "--no-session-persistence",
+                "--setting-sources", "project,user",
+                "--output-format", "text",
+                "--permission-mode", "bypassPermissions",
+                DISTILL_PROMPT,
+            ],
+            cwd=REPO_DIR,
+            stdout=fh, stderr=subprocess.STDOUT,
+            start_new_session=True,  # detach: sobrevive si el bot se reinicia
+        )
+        log(f"distill kicked off for session {prev_session_id[:8]}")
+    except FileNotFoundError:
+        log("distill skipped: `claude` CLI not in PATH")
+    except Exception as e:
+        log(f"distill kickoff failed: {e}")
 
 
 def ask_claude(prompt: str, session_id: str, is_new: bool) -> str:
@@ -322,8 +393,12 @@ def main() -> int:
                 log(f"session reset for chat {chat_id}")
                 continue
 
-            session_id, is_new = session_for_chat(state, chat_id)
+            session_id, is_new, expired = session_for_chat(state, chat_id)
             atomic_write_json(STATE, state)  # persist new session_id before the call
+            if expired:
+                # TTL rolled over: distill the just-ended session into long-term
+                # memory before its context is gone forever. Async — user doesn't wait.
+                kickoff_memory_distill(expired)
             log(f"<- [{'NEW' if is_new else 'CONT'} {session_id[:8]}] {text[:200]}")
             send_typing(token, chat_id)
             reply = ask_claude(text, session_id, is_new)
