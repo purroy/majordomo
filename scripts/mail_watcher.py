@@ -44,6 +44,7 @@ from mail_clean_reports import clean_account as clean_reports_for
 from watcher_base import (
     Logger,
     atomic_write_json,
+    html_escape,
     load_json,
     push_to_telegram,
     run_claude,
@@ -57,6 +58,61 @@ log = Logger(REPO_DIR / "briefings" / "mail_watcher.log")
 CLAUDE_TIMEOUT_S = 240
 MAX_NEW_PER_RUN = 30  # safety cap per account
 IMAP_RETRIES = 3
+
+# Format produced by Claude in build_prompt() output:
+#   "<TAG> [<account>/<UID>] <sender> - <summary>"
+# Brackets are optional (Claude is inconsistent). Sender does not contain
+# " - " in practice (we ask for "short sender"); summary may, e.g. the
+# trailing " - mark as spam?" suffix on SUSPICIOUS lines, which we want to
+# preserve. Hence: split at the FIRST " - " only.
+TRIAGE_LINE_RE = re.compile(
+    r"^(FIRE|IMPORTANT|SUSPICIOUS)\s+\[?([^\s\]]+)\]?\s+(.+?)\s+-\s+(.+)$"
+)
+
+TAG_ICON = {"FIRE": "🔥", "IMPORTANT": "⚠", "SUSPICIOUS": "🚫"}
+
+
+def format_triage_lines_html(lines: list[str], header: str) -> str:
+    """Reformat Claude's flat triage lines as Telegram HTML.
+
+    Groups by tag (in FIRE → SUSPICIOUS → IMPORTANT order), bolds sender,
+    puts <account>/<uid> in <code>, summary on its own line. Lines that
+    don't match the regex are emitted as <code>raw</code> so we never
+    silently drop a triaged item.
+    """
+    by_tag: dict[str, list[tuple[str, str, str]]] = {"FIRE": [], "SUSPICIOUS": [], "IMPORTANT": []}
+    unmatched: list[str] = []
+    for raw in lines:
+        s = raw.strip()
+        if not s:
+            continue
+        m = TRIAGE_LINE_RE.match(s)
+        if not m:
+            unmatched.append(s)
+            continue
+        tag, slot, sender, summary = m.group(1), m.group(2), m.group(3), m.group(4)
+        by_tag.setdefault(tag, []).append((slot, sender, summary))
+
+    out = [f"<b>{header}</b>"]
+    for tag in ("FIRE", "SUSPICIOUS", "IMPORTANT"):
+        items = by_tag.get(tag) or []
+        if not items:
+            continue
+        icon = TAG_ICON.get(tag, "")
+        out.append("")
+        out.append(f"<b>{icon} {tag} ({len(items)})</b>")
+        for slot, sender, summary in items:
+            out.append("")
+            out.append(
+                f"<b>{html_escape(sender)}</b> · <code>{html_escape(slot)}</code>"
+            )
+            out.append(html_escape(summary))
+    if unmatched:
+        out.append("")
+        out.append("<b>(sin clasificar)</b>")
+        for s in unmatched:
+            out.append(f"<code>{html_escape(s)}</code>")
+    return "\n".join(out)
 
 
 # --- Noise pre-filter -------------------------------------------------------
@@ -302,9 +358,8 @@ def main() -> int:
     important = [l for l in lines if l.startswith("IMPORTANT")]
 
     if urgent:
-        push_text = "\n".join(urgent)
         log(f"sending {len(urgent)} urgent to telegram")
-        push_to_telegram(f"Mail\n\n{push_text}", log=log)
+        push_to_telegram(format_triage_lines_html(urgent, "Mail — urgente"), log=log)
     else:
         log(f"no urgent items (FIRE/SUSPICIOUS)")
 

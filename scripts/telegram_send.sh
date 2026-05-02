@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 # Envía un mensaje al chat privado del PA en Telegram.
 # Uso: telegram_send.sh "Texto" [parse_mode]
-#   parse_mode: Markdown (default), MarkdownV2, HTML, "" (sin formato)
+#   parse_mode: si NO se pasa segundo argumento → Markdown (compat).
+#               si se pasa "" explícito         → texto plano (sin parse_mode).
+#               otros valores: Markdown, MarkdownV2, HTML.
 #
 # Lee el texto del primer argumento, o de stdin si el argumento es "-".
 set -euo pipefail
 
 text="${1:-}"
-mode="${2:-Markdown}"
+# Uso ${2-Markdown} (sin :) para distinguir "no pasado" de "pasado vacío":
+#   - no pasado  → "Markdown" (compat con telegram_setup.sh)
+#   - vacío ""   → "" (texto plano; lo usa run_briefing.sh tras md_to_telegram)
+mode="${2-Markdown}"
 [ -z "$text" ] && { echo "usage: $0 <text|-> [parse_mode]" >&2; exit 2; }
 if [ "$text" = "-" ]; then
   text="$(cat)"

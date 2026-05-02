@@ -23,7 +23,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from watcher_base import Logger, atomic_write_json, load_json, push_to_telegram
+from watcher_base import Logger, atomic_write_json, html_escape, load_json, push_to_telegram
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 STATE = REPO_DIR / ".goals_watch_state.json"
@@ -69,39 +69,80 @@ def run_list() -> dict | None:
 
 
 # --- message builders --------------------------------------------------------
+# Todos los mensajes salen con parse_mode=HTML. Cualquier texto que venga del
+# usuario (goals.local.md → area/title/progress/desc) pasa por html_escape.
+
+# Orden estable para agrupar items por área (EOS: Cash → People → Execution → Strategy).
+AREA_ORDER = ["Cash", "People", "Execution", "Strategy"]
+
+
+def _area_key(area: str) -> tuple[int, str]:
+    """Sort key: known areas en orden EOS, resto alfabético al final."""
+    try:
+        return (AREA_ORDER.index(area), "")
+    except ValueError:
+        return (len(AREA_ORDER), area.lower())
+
+
+def _group_by_area(items: list[dict]) -> list[tuple[str, list[dict]]]:
+    """Agrupa preservando el orden estable de AREA_ORDER."""
+    by_area: dict[str, list[dict]] = {}
+    for it in items:
+        by_area.setdefault(it["area"], []).append(it)
+    return sorted(by_area.items(), key=lambda kv: _area_key(kv[0]))
+
 
 def build_deadline_msg(overdue: list[dict], due_soon: list[dict]) -> str:
-    lines = ["Goals - deadlines"]
+    total = len(overdue) + len(due_soon)
+    lines = [f"<b>⏰ Goals — deadlines ({total})</b>"]
     if overdue:
         lines.append("")
-        lines.append("OVERDUE:")
-        for e in overdue:
-            lines.append(f"- {e['area']} | {e['title']}  (due {e['due']}, {abs(e['days_until'])}d late)")
+        lines.append(f"<b>🔥 OVERDUE ({len(overdue)})</b>")
+        for area, group in _group_by_area(overdue):
+            lines.append("")
+            lines.append(f"<b>{html_escape(area)}</b>")
+            for e in group:
+                lines.append(
+                    f"• {html_escape(e['title'])} "
+                    f"<i>(due {e['due']}, {abs(e['days_until'])}d late)</i>"
+                )
     if due_soon:
         lines.append("")
-        lines.append("Due in 2 days or less:")
-        for e in due_soon:
-            d = e["days_until"]
-            when = "today" if d == 0 else ("tomorrow" if d == 1 else f"in {d}d")
-            lines.append(f"- {e['area']} | {e['title']}  ({when}, {e['due']})")
+        lines.append(f"<b>⚠ Due in ≤2 days ({len(due_soon)})</b>")
+        for area, group in _group_by_area(due_soon):
+            lines.append("")
+            lines.append(f"<b>{html_escape(area)}</b>")
+            for e in group:
+                d = e["days_until"]
+                when = "hoy" if d == 0 else ("mañana" if d == 1 else f"en {d}d")
+                lines.append(f"• {html_escape(e['title'])} <i>({when}, {e['due']})</i>")
     lines.append("")
-    lines.append("Update with: /goals done <match>  or  /goals update <match> --progress ...")
+    lines.append("<i>Actualizar:</i> <code>/goals done &lt;match&gt;</code>")
     return "\n".join(lines)
 
 
 def build_monday_msg(snapshot: dict) -> str:
     rocks = [it for it in snapshot.get("rocks", []) if not it["checked"]]
-    lines = ["Monday - rocks check-in"]
-    lines.append("")
     q = snapshot.get("period", {}).get("quarter", "current quarter")
-    lines.append(f"Open rocks ({q}):")
-    for it in rocks:
-        prog = it["attrs"].get("progress", "").strip(' "\'')
-        prog_str = f" - {prog}" if prog else " - (no progress recorded)"
-        lines.append(f"- {it['area']} | {it['title']}{prog_str}")
+    lines = [f"<b>📅 Monday — rocks check-in</b>"]
     lines.append("")
-    lines.append("Which is the focus rock this week? Update with:")
-    lines.append("  /goals update <match> --progress \"...\"")
+    lines.append(f"<i>Open rocks · {html_escape(q)} ({len(rocks)})</i>")
+    for area, group in _group_by_area(rocks):
+        lines.append("")
+        lines.append(f"<b>{html_escape(area)}</b>")
+        for it in group:
+            prog = it["attrs"].get("progress", "").strip(' "\'')
+            if prog:
+                lines.append(
+                    f"• {html_escape(it['title'])}\n  <i>{html_escape(prog)}</i>"
+                )
+            else:
+                lines.append(
+                    f"• {html_escape(it['title'])}\n  <i>(sin progreso registrado)</i>"
+                )
+    lines.append("")
+    lines.append("<i>¿Cuál es el rock foco de esta semana?</i>")
+    lines.append("<code>/goals update &lt;match&gt; --progress \"...\"</code>")
     return "\n".join(lines)
 
 
@@ -110,21 +151,27 @@ def build_friday_msg(snapshot: dict, stale_rocks: list[dict]) -> str:
     week_start = today - dt.timedelta(days=today.weekday())  # Monday
     done_this_week = [d for d in snapshot.get("done_log", [])
                       if d["date"] >= week_start.isoformat()]
-    lines = ["Friday - weekly retro"]
+    lines = ["<b>📅 Friday — weekly retro</b>"]
     lines.append("")
     if done_this_week:
-        lines.append(f"Completed this week ({len(done_this_week)}):")
-        for d in done_this_week:
-            lines.append(f"- {d['date']} | {d['area']} | {d['desc']}")
+        lines.append(f"<b>✅ Completado esta semana ({len(done_this_week)})</b>")
+        for area, group in _group_by_area(done_this_week):
+            lines.append("")
+            lines.append(f"<b>{html_escape(area)}</b>")
+            for d in group:
+                lines.append(f"• {html_escape(d['desc'])} <i>({d['date']})</i>")
     else:
-        lines.append("Nothing marked done this week.")
+        lines.append("<i>Nada marcado como hecho esta semana.</i>")
     if stale_rocks:
         lines.append("")
-        lines.append("Rocks without progress:")
-        for r in stale_rocks:
-            lines.append(f"- {r['area']} | {r['title']}")
+        lines.append(f"<b>⏳ Rocks sin progreso ({len(stale_rocks)})</b>")
+        for area, group in _group_by_area(stale_rocks):
+            lines.append("")
+            lines.append(f"<b>{html_escape(area)}</b>")
+            for r in group:
+                lines.append(f"• {html_escape(r['title'])}")
     lines.append("")
-    lines.append("Close the week: any rock to move before Monday?")
+    lines.append("<i>Cierre de semana: ¿algún rock para mover antes del lunes?</i>")
     return "\n".join(lines)
 
 
@@ -132,23 +179,24 @@ def build_revenue_msg(missing_months: list[str]) -> str:
     if len(missing_months) == 1:
         m = missing_months[0]
         return (
-            f"Revenue reminder\n\n"
-            f"Revenue for {m} is not filled in.\n"
-            f"Set it with: python3 scripts/goals.py revenue {m} <amount>\n"
-            f"(or null if no revenue booked)"
+            f"<b>💰 Revenue reminder</b>\n\n"
+            f"Revenue de <b>{html_escape(m)}</b> sin rellenar.\n"
+            f"<code>python3 scripts/goals.py revenue {html_escape(m)} &lt;amount&gt;</code>\n"
+            f"<i>(o null si no hubo facturación)</i>"
         )
+    months_str = ", ".join(html_escape(m) for m in missing_months)
     return (
-        "Revenue reminder\n\n"
-        f"Missing revenue for: {', '.join(missing_months)}\n"
-        f"Fill each with: python3 scripts/goals.py revenue YYYY-MM <amount>"
+        f"<b>💰 Revenue reminder</b>\n\n"
+        f"Faltan: {months_str}\n"
+        f"<code>python3 scripts/goals.py revenue YYYY-MM &lt;amount&gt;</code>"
     )
 
 
 def build_quarter_msg(q: dict) -> str:
     return (
-        f"Quarter closing - {q['quarter']}\n\n"
-        f"Ends {q['ends']} ({q['days_until']}d).\n"
-        f"Time to review open rocks, mark what's done, and prepare next-quarter rocks."
+        f"<b>🏁 Quarter closing — {html_escape(q['quarter'])}</b>\n\n"
+        f"Termina <b>{q['ends']}</b> ({q['days_until']}d).\n"
+        f"Revisar rocks abiertos, marcar lo hecho y preparar los del siguiente trimestre."
     )
 
 

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import re
 import sys
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from _mail import get_secret
 from watcher_base import (
     Logger,
     atomic_write_json,
+    html_escape,
     load_json,
     push_to_telegram,
     run_claude,
@@ -38,6 +40,49 @@ STATE = REPO_DIR / ".slack_watch_state.json"
 log = Logger(REPO_DIR / "briefings" / "slack_watcher.log")
 
 CLAUDE_TIMEOUT_S = 240
+
+# Format from build_prompt(): "<TAG> [HH:MM] @<name> in <#channel|DM> - <summary>"
+SLACK_LINE_RE = re.compile(
+    r"^(FIRE|IMPORTANT)\s+\[([\d:]+)\]\s+(@\S+)\s+in\s+(\S+)\s+-\s+(.+)$"
+)
+SLACK_TAG_ICON = {"FIRE": "🔥", "IMPORTANT": "⚠"}
+
+
+def format_slack_lines_html(lines: list[str]) -> str:
+    by_tag: dict[str, list[tuple[str, str, str, str]]] = {"FIRE": [], "IMPORTANT": []}
+    unmatched: list[str] = []
+    for raw in lines:
+        s = raw.strip()
+        if not s:
+            continue
+        m = SLACK_LINE_RE.match(s)
+        if not m:
+            unmatched.append(s)
+            continue
+        tag, hhmm, who, where, summary = m.groups()
+        by_tag.setdefault(tag, []).append((hhmm, who, where, summary))
+
+    total = sum(len(v) for v in by_tag.values()) + len(unmatched)
+    out = [f"<b>💬 Slack — algo para ti ({total})</b>"]
+    for tag in ("FIRE", "IMPORTANT"):
+        items = by_tag.get(tag) or []
+        if not items:
+            continue
+        icon = SLACK_TAG_ICON.get(tag, "")
+        out.append("")
+        out.append(f"<b>{icon} {tag} ({len(items)})</b>")
+        for hhmm, who, where, summary in items:
+            out.append("")
+            out.append(
+                f"<b>{html_escape(who)}</b> · <code>{html_escape(where)}</code> · <i>{html_escape(hhmm)}</i>"
+            )
+            out.append(html_escape(summary))
+    if unmatched:
+        out.append("")
+        out.append("<b>(sin clasificar)</b>")
+        for s in unmatched:
+            out.append(f"<code>{html_escape(s)}</code>")
+    return "\n".join(out)
 
 
 def build_prompt(since_iso: str, user_id: str) -> str:
@@ -121,7 +166,7 @@ def main() -> int:
         return 0
 
     log(f"sending to telegram ({len(output)} chars)")
-    push_to_telegram(f"Slack - something for you\n\n{output}", log=log)
+    push_to_telegram(format_slack_lines_html(output.splitlines()), log=log)
     return 0
 
 

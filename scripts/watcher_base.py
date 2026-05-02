@@ -163,10 +163,28 @@ def run_claude(
 
 # --- Telegram push ----------------------------------------------------------
 
-def push_to_telegram(text: str, *, log=None) -> int:
-    """Send `text` to the owner's Telegram via `telegram_send.sh`."""
+import html as _html
+
+
+def html_escape(s: str) -> str:
+    """Escape <, >, & for Telegram HTML parse_mode.
+
+    Use on any user-controlled content (mail subjects, sender names, Claude
+    output, goals.local.md fields) before embedding inside <b>/<code>/etc.
+    `_` and `*` need NO escaping in HTML mode (unlike Markdown), which is
+    why we picked HTML — they appear inside subjects (`shopify_order_to_sap`)
+    and the Markdown parser was rendering them as italic.
+    """
+    return _html.escape(s, quote=False)
+
+
+def push_to_telegram(text: str, *, log=None, parse_mode: str = "HTML") -> int:
+    """Send `text` to the owner's Telegram via `telegram_send.sh`.
+
+    Defaults to HTML parse_mode. Pass parse_mode="" for plain text.
+    """
     res = subprocess.run(
-        ["bash", str(REPO_DIR / "scripts" / "telegram_send.sh"), "-", ""],
+        ["bash", str(REPO_DIR / "scripts" / "telegram_send.sh"), "-", parse_mode],
         input=text, text=True, capture_output=True,
     )
     if res.returncode != 0 and log:

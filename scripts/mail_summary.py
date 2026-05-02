@@ -7,6 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from mail_watcher import format_triage_lines_html
 from watcher_base import Logger, atomic_write_json, load_json, push_to_telegram
 
 REPO_DIR = Path(__file__).resolve().parent.parent
@@ -21,12 +22,11 @@ def main() -> int:
         log("summary 4h: nothing pending")
         return 0
 
-    text = "\n".join(pending)
     state["pending_important"] = []
     atomic_write_json(STATE, state)
 
     log(f"summary 4h: pushing {len(pending)} items")
-    push_to_telegram(f"Mail - resumen\n\n{text}", log=log)
+    push_to_telegram(format_triage_lines_html(pending, "Mail — resumen 4h"), log=log)
     return 0
 
 
