@@ -59,6 +59,12 @@ When the owner asks about goals, objectives, rocks, EOS, monthly commitments, an
 
 Under the hood: `scripts/goals.py` (CLI), `scripts/goals_watcher.py` (Telegram nudges: Monday check-in, Friday retro, deadlines, revenue, quarter end). `/morning` and `/evening` include goals sections automatically when the file is present.
 
+## Working in projects under ~/Dev/ (optional layer)
+
+The bot can be extended with a routing layer that lets the owner switch into a project under `~/Dev/` and edit its code through `/proj` commands. This layer ships in a separate private repo (it hardcodes owner-specific project names and hostnames) and is opt-in: set `PA_PROJECT_ROUTER_ENABLED=1` and make `project_router.py` importable from the bot. When the module is not present, every message goes to the default chat exactly as before.
+
+If the private layer is installed, see its own `CLAUDE.md` for the rules the bot inherits when working inside a project (branch convention `pa/YYYY-MM-DD-<slug>`, pull-before-edit, commit-only-when-asked, etc.).
+
 ## Repo conventions
 
 - Unsent drafts → `drafts/` (gitignored).
@@ -68,11 +74,13 @@ Under the hood: `scripts/goals.py` (CLI), `scripts/goals_watcher.py` (Telegram n
 
 ## Environments
 
-The PA runs in two places. Always consider which one you're in before acting.
+The PA is meant to run in two places. Always consider which one you're in before acting.
 
-- **Mac dev** — `/Users/josep/Dev/PA`, user `josep`. Where Josep edits code interactively. Secrets in macOS Keychain. launchd templates in `scripts/launchd/` (Mac-only).
-- **Prod server** — `mail.kiwop.com` (Ubuntu 20.04, hostname `ns3088656`), repo at `/home/pa/PA`, runtime user `pa`. Secrets in `/home/pa/PA/.env` (mode 0600). Services managed by systemd: `pa-telegram-bot.service` (bot daemon), `pa-briefing-{morning,evening}.timer`, `pa-mail-watcher.timer`, `pa-slack-watcher.timer`, `pa-cli-update.timer`. Cron: `mail_summary.py` every 4h.
+- **Mac dev** — repo lives at `<MAC_REPO_DIR>` under user `<MAC_USER>`. Where the owner edits code interactively. Secrets in macOS Keychain. launchd templates in `scripts/launchd/` (Mac-only).
+- **Prod server** — Ubuntu host `<SERVER_HOST>` (resolved by `<SERVER_HOSTNAME>`), repo at `<SERVER_REPO_DIR>`, runtime user `<SERVER_USER>`. Secrets in `<SERVER_REPO_DIR>/.env` (mode 0600). Services managed by systemd: `pa-telegram-bot.service` (bot daemon), `pa-briefing-{morning,evening}.timer`, `pa-mail-watcher.timer`, `pa-slack-watcher.timer`, `pa-cli-update.timer`. Cron: `mail_summary.py` every 4h.
 
-Code flows Mac → GitHub → server (git pull). Private data (`goals.local.md`, memory files) do NOT go through git — they're scp'd manually to the server. The server's Claude memory lives at `/home/pa/.claude/projects/-home-pa-PA/memory/` (different slug from Mac's).
+Concrete values for `<MAC_REPO_DIR>`, `<SERVER_HOST>`, etc. live in the owner's `.env` file (gitignored) — never hardcode them in this repo.
+
+Code flows Mac → GitHub → server (git pull). Private data (`goals.local.md`, memory files) do NOT go through git — they're scp'd manually to the server. The server's Claude memory lives under `~/.claude/projects/<slug-of-cwd>/memory/` (different slug from Mac's because the repo path differs).
 
 After changing CLAUDE.md or scripts invoked by the bot on the server: `sudo systemctl restart pa-telegram-bot.service` so the bot picks them up on the next message. The bot spawns a fresh `claude -p` per message, so no in-memory state survives anyway — but logs keep streaming.

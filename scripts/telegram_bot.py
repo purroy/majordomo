@@ -29,6 +29,7 @@ Runs via systemd (Linux) or launchd (macOS), or directly:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -49,6 +50,31 @@ try:
 except ImportError:
     def md_to_text(s: str) -> str:
         return s
+
+# The Dev/-projects routing layer ("/proj" command, multi-slot sessions,
+# preflight/postflight git ops) ships in a separate private repo
+# (pa-dev-tools). It's optional: if the module is not on the Python path
+# the bot still works for the default chat. Set PA_PROJECT_ROUTER_ENABLED=1
+# in the systemd unit on the server to enable it; on the Mac it stays off
+# so the two bots never edit the same working tree at once.
+PROJECT_ROUTER_ENABLED = os.environ.get("PA_PROJECT_ROUTER_ENABLED") == "1"
+pr = None
+if PROJECT_ROUTER_ENABLED:
+    try:
+        import project_router as pr  # noqa: F401
+    except ImportError as e:
+        # Will be logged once the Logger is up; for now keep it quiet.
+        PROJECT_ROUTER_ENABLED = False
+        _pr_import_error = str(e)
+    else:
+        _pr_import_error = ""
+else:
+    _pr_import_error = ""
+
+# Local slot constant so the rest of the bot does not depend on `pr`.
+# Sessions are persisted under `chats[chat_id].sessions[slot]`. Without
+# the router every message lives in the "default" slot.
+DEFAULT_SLOT = "default"
 
 log = Logger(REPO_DIR / "briefings" / "telegram_bot.log")
 
@@ -146,36 +172,90 @@ def send_typing(token: str, chat_id: int) -> None:
         pass
 
 
-def session_for_chat(state: dict, chat_id: int) -> tuple[str, bool, str | None]:
-    """Return (session_id, is_new, expired_session_id) for this chat.
+def _migrate_legacy_state(chat_entry: dict) -> dict:
+    """Move legacy `{session_id, last_at}` into `{sessions: {default: {...}}}`.
 
-    Rotates on TTL. `expired_session_id` is the previous session_id when
-    rotation happened due to TTL expiry (not first-ever message and not
-    after /reset) — it's the signal for the memory-distill hook.
-
-    Mutates state in-place; caller is responsible for persisting it.
+    Idempotent. Inlined so the bot does not depend on `project_router` for
+    state-format upkeep — even with the routing layer absent we keep the
+    new schema so future enables don't lose history.
     """
+    if "sessions" in chat_entry:
+        chat_entry.setdefault("active", DEFAULT_SLOT)
+        return chat_entry
+    legacy_sid = chat_entry.pop("session_id", None)
+    legacy_at = chat_entry.pop("last_at", 0)
+    chat_entry["active"] = DEFAULT_SLOT
+    chat_entry["sessions"] = {}
+    if legacy_sid:
+        chat_entry["sessions"][DEFAULT_SLOT] = {
+            "session_id": legacy_sid,
+            "last_at": int(legacy_at or 0),
+        }
+    return chat_entry
+
+
+def _chat_entry(state: dict, chat_id: int) -> dict:
+    """Get-or-create the chat entry, applying legacy migration on first touch."""
     chats = state.setdefault("chats", {})
     key = str(chat_id)
-    entry = chats.get(key)
+    entry = chats.setdefault(key, {})
+    return _migrate_legacy_state(entry)
+
+
+def session_for_slot(state: dict, chat_id: int, slot: str) -> tuple[str, bool, str | None]:
+    """Return (session_id, is_new, expired_session_id) for (chat, slot).
+
+    Each slot has its own session and its own 24h TTL. Rolling over a slot
+    only affects that slot — opening /proj <my-project> doesn't disturb the default
+    chat session.
+    """
+    entry = _chat_entry(state, chat_id)
+    sessions = entry.setdefault("sessions", {})
     now = int(time.time())
-    if entry and now - int(entry.get("last_at", 0)) <= SESSION_TTL_S and entry.get("session_id"):
-        return entry["session_id"], False, None
-    expired = entry.get("session_id") if entry else None
+    s = sessions.get(slot)
+    if s and now - int(s.get("last_at", 0)) <= SESSION_TTL_S and s.get("session_id"):
+        return s["session_id"], False, None
+    expired = s.get("session_id") if s else None
     new_id = str(uuid.uuid4())
-    chats[key] = {"session_id": new_id, "last_at": now}
+    sessions[slot] = {"session_id": new_id, "last_at": now}
     return new_id, True, expired
 
 
-def touch_session(state: dict, chat_id: int) -> None:
-    """Update last_at after a successful exchange."""
+def touch_slot(state: dict, chat_id: int, slot: str) -> None:
     entry = state.get("chats", {}).get(str(chat_id))
-    if entry:
-        entry["last_at"] = int(time.time())
+    if not entry:
+        return
+    s = entry.get("sessions", {}).get(slot)
+    if s:
+        s["last_at"] = int(time.time())
 
 
-def reset_session(state: dict, chat_id: int) -> None:
-    state.get("chats", {}).pop(str(chat_id), None)
+def reset_slot(state: dict, chat_id: int, slot: str) -> None:
+    entry = state.get("chats", {}).get(str(chat_id))
+    if not entry:
+        return
+    entry.get("sessions", {}).pop(slot, None)
+    # If we just deleted the active slot, fall back to default.
+    if entry.get("active") == slot and slot != DEFAULT_SLOT:
+        entry["active"] = DEFAULT_SLOT
+
+
+def reset_all_slots(state: dict, chat_id: int) -> None:
+    entry = state.get("chats", {}).get(str(chat_id))
+    if not entry:
+        return
+    entry["sessions"] = {}
+    entry["active"] = DEFAULT_SLOT
+
+
+def active_slot(state: dict, chat_id: int) -> str:
+    entry = _chat_entry(state, chat_id)
+    return entry.get("active", DEFAULT_SLOT)
+
+
+def set_active_slot(state: dict, chat_id: int, slot: str) -> None:
+    entry = _chat_entry(state, chat_id)
+    entry["active"] = slot
 
 
 # --- Memory-distill hook (TTL rollover) ------------------------------------
@@ -211,16 +291,28 @@ Output (a stdout, lo recoge el log del bot):
 """
 
 
-def kickoff_memory_distill(prev_session_id: str) -> None:
+def kickoff_memory_distill(prev_session_id: str, slot: str = DEFAULT_SLOT) -> None:
     """Lanza en background `claude -p --resume <prev>` con el prompt de extracción.
 
     Non-blocking: el usuario no espera. Output redirigido a un log dedicado.
-    Si el binario `claude` no está, falla en silencio (logueado).
+    `slot` decide el cwd, de modo que las memorias destiladas de una sesión
+    de proyecto quedan bajo `~/.claude/projects/-home-pa-Dev-<slug>/memory/`
+    y no contaminan la memoria del PA.
     """
+    cwd = pr.cwd_for(slot) if (pr is not None and slot != DEFAULT_SLOT) else REPO_DIR
+    # The slot directory may have been deleted/renamed between when the
+    # session was created and now (>24h later). Without this guard the
+    # Popen below raises FileNotFoundError and the distill is dropped
+    # silently.
+    if not cwd.is_dir():
+        log(f"distill: slot dir {cwd} missing, falling back to REPO_DIR")
+        cwd = REPO_DIR
     try:
         DISTILL_LOG.parent.mkdir(exist_ok=True)
         fh = open(DISTILL_LOG, "ab")
-        fh.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} distill session={prev_session_id} ===\n".encode())
+        fh.write(
+            f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} distill session={prev_session_id} slot={slot} cwd={cwd} ===\n".encode()
+        )
         fh.flush()
         subprocess.Popen(
             [
@@ -233,35 +325,42 @@ def kickoff_memory_distill(prev_session_id: str) -> None:
                 "--permission-mode", "bypassPermissions",
                 DISTILL_PROMPT,
             ],
-            cwd=REPO_DIR,
+            cwd=cwd,
             stdout=fh, stderr=subprocess.STDOUT,
             start_new_session=True,  # detach: sobrevive si el bot se reinicia
         )
-        log(f"distill kicked off for session {prev_session_id[:8]}")
+        log(f"distill kicked off for session {prev_session_id[:8]} (slot={slot})")
     except FileNotFoundError:
         log("distill skipped: `claude` CLI not in PATH")
     except Exception as e:
         log(f"distill kickoff failed: {e}")
 
 
-def ask_claude(prompt: str, session_id: str, is_new: bool) -> str:
+def ask_claude(
+    prompt: str,
+    session_id: str,
+    is_new: bool,
+    *,
+    slot: str = DEFAULT_SLOT,
+) -> str:
     """Invoke claude --print, creating or resuming the chat's session.
 
     Default model: Sonnet (cheaper, fine for triage / short questions).
     If the prompt starts with `!opus ` Opus is used instead.
 
-    Session continuity: `--session-id <id>` is a CREATE-only flag — the id
-    cannot be reused for a second invocation. To continue, use
-    `--resume <id>`. So:
-      - First message of a chat (is_new=True): --session-id <new-uuid>
-      - Subsequent messages:                   --resume <same-uuid>
-    `--no-session-persistence` stays OFF so claude writes the transcript
-    between invocations.
+    When `slot != default` the call runs with `cwd = DEV_ROOT/<slot>` and
+    `--add-dir <PA repo>` so Claude can still read PA scripts and memory.
     """
     use_opus = prompt.startswith("!opus ")
     if use_opus:
         prompt = prompt[len("!opus "):]
     session_flag = ["--session-id", session_id] if is_new else ["--resume", session_id]
+    if slot != DEFAULT_SLOT and pr is not None:
+        cwd = pr.cwd_for(slot)
+        extra_args = ["--add-dir", str(REPO_DIR)]
+    else:
+        cwd = REPO_DIR
+        extra_args = []
     cmd = [
         "claude", "--print",
         "--model", "opus" if use_opus else "sonnet",
@@ -269,11 +368,12 @@ def ask_claude(prompt: str, session_id: str, is_new: bool) -> str:
         "--setting-sources", "project,user",
         "--output-format", "text",
         "--permission-mode", "bypassPermissions",
+        *extra_args,
         prompt,
     ]
     try:
         out = subprocess.run(
-            cmd, cwd=REPO_DIR, capture_output=True, text=True,
+            cmd, cwd=cwd, capture_output=True, text=True,
             timeout=CLAUDE_TIMEOUT_S,
         )
     except subprocess.TimeoutExpired:
@@ -296,7 +396,13 @@ def main() -> int:
 
     state = load_json(STATE, {"offset": 0, "chats": {}})
     state.setdefault("chats", {})
-    log(f"Bot up. Allowed chat={allowed_chat} (persistent session, TTL {SESSION_TTL_S//3600}h)")
+    if PROJECT_ROUTER_ENABLED and pr is not None:
+        router = f"router=on (DEV_ROOT={pr.DEV_ROOT})"
+    elif _pr_import_error:
+        router = f"router=off (import failed: {_pr_import_error})"
+    else:
+        router = "router=off"
+    log(f"Bot up. Allowed chat={allowed_chat} (TTL {SESSION_TTL_S//3600}h, {router})")
 
     backoff = BACKOFF_START_S
 
@@ -385,28 +491,129 @@ def main() -> int:
                     atomic_write_json(STATE, state)
                 continue
 
-            if text == "/reset":
-                reset_session(state, chat_id)
+            # /reset and /reset all (tolerant to extra whitespace / mixed case).
+            reset_parts = text.split()
+            if reset_parts and reset_parts[0].lower() == "/reset" and len(reset_parts) <= 2:
+                arg = reset_parts[1].lower() if len(reset_parts) == 2 else ""
+                if arg and arg != "all":
+                    send_message(token, chat_id, "Uso: /reset  o  /reset all")
+                    state["offset"] = update_id
+                    atomic_write_json(STATE, state)
+                    continue
+                slot = active_slot(state, chat_id)
+                if arg == "all":
+                    reset_all_slots(state, chat_id)
+                    note = "Todas las sesiones reiniciadas (default + proyectos)."
+                else:
+                    reset_slot(state, chat_id, slot)
+                    landed = active_slot(state, chat_id)
+                    if landed != slot:
+                        note = f"Sesión «{slot}» reiniciada. Vuelta al slot «{landed}»."
+                    else:
+                        note = f"Sesión «{slot}» reiniciada. El próximo mensaje empieza de cero."
                 state["offset"] = update_id
                 atomic_write_json(STATE, state)
-                send_message(token, chat_id, "Sesión reiniciada. El próximo mensaje empieza de cero.")
-                log(f"session reset for chat {chat_id}")
+                send_message(token, chat_id, note)
+                log(f"session reset for chat {chat_id} ({text!r})")
                 continue
 
-            session_id, is_new, expired = session_for_chat(state, chat_id)
+            # Project routing is opt-in: only if PA_PROJECT_ROUTER_ENABLED=1
+            # AND the private `project_router` module is importable. Without
+            # it, every message goes to the default chat exactly as the old
+            # bot used to behave — including a `/proj …` typed by accident,
+            # which we politely refuse below.
+            if PROJECT_ROUTER_ENABLED and pr is not None:
+                decision = pr.parse_command(text, active_slot=active_slot(state, chat_id))
+            elif text.startswith("/proj"):
+                send_message(
+                    token, chat_id,
+                    "El routing /proj no está disponible en este host. "
+                    "Requiere el módulo project_router (repo privado).",
+                )
+                state["offset"] = update_id
+                atomic_write_json(STATE, state)
+                continue
+            else:
+                # Fall through to the legacy default-slot flow.
+                decision = None
+
+            # decision is None means "no router; treat as default-slot exec".
+            if decision is not None and decision.kind == "list":
+                projects = pr.discover_projects()
+                send_message(token, chat_id, pr.render_project_list_html(projects), parse_mode="HTML")
+                state["offset"] = update_id
+                atomic_write_json(STATE, state)
+                continue
+
+            if decision is not None and decision.kind == "info":
+                info = pr.project_info(decision.slot)
+                if info is None:
+                    send_message(token, chat_id, f"No encuentro «{decision.slot}» en {pr.DEV_ROOT}.")
+                else:
+                    set_active_slot(state, chat_id, decision.slot)
+                    send_message(token, chat_id, pr.render_project_info_html(info), parse_mode="HTML")
+                state["offset"] = update_id
+                atomic_write_json(STATE, state)
+                continue
+
+            if decision is not None and decision.kind == "exit":
+                set_active_slot(state, chat_id, DEFAULT_SLOT)
+                state["offset"] = update_id
+                atomic_write_json(STATE, state)
+                send_message(token, chat_id, "Vuelta al chat default.")
+                continue
+
+            if decision is not None and decision.kind == "error":
+                send_message(token, chat_id, decision.error)
+                state["offset"] = update_id
+                atomic_write_json(STATE, state)
+                continue
+
+            # Either decision is None (no router) or decision.kind == "exec".
+            if decision is None:
+                slot = DEFAULT_SLOT
+                user_prompt = text
+            else:
+                slot = decision.slot
+                user_prompt = decision.prompt
+
+            preflight = None
+            if slot != DEFAULT_SLOT:
+                preflight = pr.preflight(slot)
+                if not preflight.ok:
+                    send_message(token, chat_id, f"⚠ {preflight.reason}")
+                    state["offset"] = update_id
+                    atomic_write_json(STATE, state)
+                    log(f"preflight blocked for slot={slot}: {preflight.reason}")
+                    continue
+                # Lock in the active slot for follow-up messages.
+                set_active_slot(state, chat_id, slot)
+
+            session_id, is_new, expired = session_for_slot(state, chat_id, slot)
             atomic_write_json(STATE, state)  # persist new session_id before the call
             if expired:
-                # TTL rolled over: distill the just-ended session into long-term
-                # memory before its context is gone forever. Async — user doesn't wait.
-                kickoff_memory_distill(expired)
-            log(f"<- [{'NEW' if is_new else 'CONT'} {session_id[:8]}] {text[:200]}")
+                kickoff_memory_distill(expired, slot=slot)
+
+            log(f"<- [{'NEW' if is_new else 'CONT'} {session_id[:8]} slot={slot}] {user_prompt[:200]}")
             send_typing(token, chat_id)
-            reply = ask_claude(text, session_id, is_new)
+
+            if slot != DEFAULT_SLOT:
+                full_prompt = pr.build_prompt_prefix(slot, user_prompt, branch=preflight.branch if preflight else "")
+            else:
+                full_prompt = user_prompt
+
+            reply = ask_claude(full_prompt, session_id, is_new, slot=slot)
             log(f"-> {reply[:200]}")
-            # Telegram does not render GitHub-flavoured markdown; flatten.
-            delivered = send_message(token, chat_id, md_to_text(reply))
+
+            if slot != DEFAULT_SLOT:
+                report = pr.postflight(slot, preflight.before_sha)
+                out_html = pr.render_report_html(md_to_text(reply), report)
+                delivered = send_message(token, chat_id, out_html, parse_mode="HTML")
+            else:
+                delivered = send_message(token, chat_id, md_to_text(reply))
+
             if delivered:
-                touch_session(state, chat_id)
+                touch_slot(state, chat_id, slot)
                 state["offset"] = update_id
                 atomic_write_json(STATE, state)
             else:
