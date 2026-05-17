@@ -361,6 +361,13 @@ def ask_claude(
     else:
         cwd = REPO_DIR
         extra_args = []
+    # Pass the prompt via stdin, not as a positional arg. Two reasons:
+    #   - `--add-dir` is variadic in the claude CLI: anything that follows it
+    #     until the next `--flag` is treated as another directory, so a
+    #     positional prompt right after `--add-dir <dir>` gets swallowed and
+    #     claude errors with "Input must be provided…".
+    #   - Long prompts (we wrap the user request in a multi-line prefix that
+    #     can be >1 KB) can hit ARG_MAX limits on some kernels.
     cmd = [
         "claude", "--print",
         "--model", "opus" if use_opus else "sonnet",
@@ -369,11 +376,10 @@ def ask_claude(
         "--output-format", "text",
         "--permission-mode", "bypassPermissions",
         *extra_args,
-        prompt,
     ]
     try:
         out = subprocess.run(
-            cmd, cwd=cwd, capture_output=True, text=True,
+            cmd, cwd=cwd, input=prompt, capture_output=True, text=True,
             timeout=CLAUDE_TIMEOUT_S,
         )
     except subprocess.TimeoutExpired:
