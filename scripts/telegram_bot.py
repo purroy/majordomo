@@ -621,22 +621,35 @@ def main() -> int:
             reply = ask_claude(full_prompt, session_id, is_new, slot=slot, model=model)
             log(f"-> {reply[:200]}")
 
-            # Self-heal zombie sessions. Two failure modes leave a session_id
-            # persisted in state that claude has no transcript for:
+            # Self-heal zombie sessions and retry in-place. Two failure modes
+            # leave a session_id persisted in state that claude has no
+            # transcript for:
             #   - The very first claude --session-id <new> call failed with
             #     rc!=0 (the session never got created server-side).
             #   - The transcript was deleted/moved between calls.
             # Both surface as "No conversation found with session ID" on the
-            # next --resume. We drop the slot here so the next message starts
-            # a fresh session instead of being stuck for 24h until the TTL.
+            # next --resume. Without retry the user gets the error and has to
+            # resend the same message just to "use up" the bad state; that's
+            # confusing. So we drop the slot and re-invoke claude immediately.
+            # Only one retry — if it fails again, it's a real error worth
+            # surfacing.
             session_dead = (
                 "No conversation found with session ID" in reply
                 or (is_new and reply.startswith("⚠ claude rc="))
             )
             if session_dead:
-                log(f"session {session_id[:8]} broken; resetting slot={slot}")
+                log(f"session {session_id[:8]} broken; resetting slot={slot} and retrying")
                 reset_slot(state, chat_id, slot)
+                # reset_slot un-stickys non-default slots; re-pin so the
+                # user stays in the slot they were using.
+                if slot != DEFAULT_SLOT:
+                    set_active_slot(state, chat_id, slot)
                 atomic_write_json(STATE, state)
+                session_id, is_new, _ = session_for_slot(state, chat_id, slot)
+                atomic_write_json(STATE, state)
+                log(f"<- [RETRY {session_id[:8]} slot={slot} model={model}]")
+                reply = ask_claude(full_prompt, session_id, is_new, slot=slot, model=model)
+                log(f"-> {reply[:200]}")
 
             if slot != DEFAULT_SLOT:
                 report = pr.postflight(slot, preflight.before_sha)
