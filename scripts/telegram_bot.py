@@ -621,6 +621,23 @@ def main() -> int:
             reply = ask_claude(full_prompt, session_id, is_new, slot=slot, model=model)
             log(f"-> {reply[:200]}")
 
+            # Self-heal zombie sessions. Two failure modes leave a session_id
+            # persisted in state that claude has no transcript for:
+            #   - The very first claude --session-id <new> call failed with
+            #     rc!=0 (the session never got created server-side).
+            #   - The transcript was deleted/moved between calls.
+            # Both surface as "No conversation found with session ID" on the
+            # next --resume. We drop the slot here so the next message starts
+            # a fresh session instead of being stuck for 24h until the TTL.
+            session_dead = (
+                "No conversation found with session ID" in reply
+                or (is_new and reply.startswith("⚠ claude rc="))
+            )
+            if session_dead:
+                log(f"session {session_id[:8]} broken; resetting slot={slot}")
+                reset_slot(state, chat_id, slot)
+                atomic_write_json(STATE, state)
+
             if slot != DEFAULT_SLOT:
                 report = pr.postflight(slot, preflight.before_sha)
                 out_html = pr.render_report_html(md_to_text(reply), report)
