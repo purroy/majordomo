@@ -554,7 +554,13 @@ def main() -> int:
                     send_message(token, chat_id, f"No encuentro «{decision.slot}» en {pr.DEV_ROOT}.")
                 else:
                     set_active_slot(state, chat_id, decision.slot)
-                    send_message(token, chat_id, pr.render_project_info_html(info), parse_mode="HTML")
+                    body = (
+                        pr.render_project_info_html(info)
+                        + f"\n\n<i>Sticky activado en «{decision.slot}». "
+                        + "Los próximos mensajes sin slash siguen aquí. "
+                        + "<code>/proj exit</code> para volver al chat default.</i>"
+                    )
+                    send_message(token, chat_id, body, parse_mode="HTML")
                 state["offset"] = update_id
                 atomic_write_json(STATE, state)
                 continue
@@ -602,8 +608,13 @@ def main() -> int:
                     atomic_write_json(STATE, state)
                     log(f"preflight blocked for slot={slot}: {preflight.reason}")
                     continue
-                # Lock in the active slot for follow-up messages.
-                set_active_slot(state, chat_id, slot)
+                # IMPORTANT: do NOT set_active_slot here. `/proj <slug> <petición>`
+                # is one-shot — the message runs in <slug> but subsequent
+                # messages without /proj go back to the default chat. Sticky
+                # mode is opt-in via `/proj <slug>` (info handler) which DOES
+                # set_active_slot. Without this distinction a single
+                # `/proj tnc <X>` traps every unrelated message that follows
+                # (mail triage, vocab, goals) inside cwd=tnc for 24h.
 
             session_id, is_new, expired = session_for_slot(state, chat_id, slot)
             atomic_write_json(STATE, state)  # persist new session_id before the call
@@ -640,10 +651,6 @@ def main() -> int:
             if session_dead:
                 log(f"session {session_id[:8]} broken; resetting slot={slot} and retrying")
                 reset_slot(state, chat_id, slot)
-                # reset_slot un-stickys non-default slots; re-pin so the
-                # user stays in the slot they were using.
-                if slot != DEFAULT_SLOT:
-                    set_active_slot(state, chat_id, slot)
                 atomic_write_json(STATE, state)
                 session_id, is_new, _ = session_for_slot(state, chat_id, slot)
                 atomic_write_json(STATE, state)
