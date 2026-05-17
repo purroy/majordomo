@@ -342,18 +342,15 @@ def ask_claude(
     is_new: bool,
     *,
     slot: str = DEFAULT_SLOT,
+    model: str = "sonnet",
 ) -> str:
     """Invoke claude --print, creating or resuming the chat's session.
 
-    Default model: Sonnet (cheaper, fine for triage / short questions).
-    If the prompt starts with `!opus ` Opus is used instead.
-
+    `model` is chosen by the caller (the main loop picks Opus for `/proj`
+    slots, Sonnet otherwise, and honours `!opus`/`!sonnet` overrides).
     When `slot != default` the call runs with `cwd = DEV_ROOT/<slot>` and
     `--add-dir <PA repo>` so Claude can still read PA scripts and memory.
     """
-    use_opus = prompt.startswith("!opus ")
-    if use_opus:
-        prompt = prompt[len("!opus "):]
     session_flag = ["--session-id", session_id] if is_new else ["--resume", session_id]
     if slot != DEFAULT_SLOT and pr is not None:
         cwd = pr.cwd_for(slot)
@@ -370,7 +367,7 @@ def ask_claude(
     #     can be >1 KB) can hit ARG_MAX limits on some kernels.
     cmd = [
         "claude", "--print",
-        "--model", "opus" if use_opus else "sonnet",
+        "--model", model,
         *session_flag,
         "--setting-sources", "project,user",
         "--output-format", "text",
@@ -583,6 +580,19 @@ def main() -> int:
                 slot = decision.slot
                 user_prompt = decision.prompt
 
+            # Pick the model BEFORE we wrap the prompt in build_prompt_prefix;
+            # otherwise the `!opus`/`!sonnet` markers get buried inside the
+            # prefix and ask_claude can't see them. Defaults: Opus for /proj
+            # slots (code tasks benefit from it), Sonnet for the default chat
+            # (cheaper for triage / mail / briefings).
+            model = "opus" if slot != DEFAULT_SLOT else "sonnet"
+            if user_prompt.startswith("!opus "):
+                model = "opus"
+                user_prompt = user_prompt[len("!opus "):]
+            elif user_prompt.startswith("!sonnet "):
+                model = "sonnet"
+                user_prompt = user_prompt[len("!sonnet "):]
+
             preflight = None
             if slot != DEFAULT_SLOT:
                 preflight = pr.preflight(slot)
@@ -600,7 +610,7 @@ def main() -> int:
             if expired:
                 kickoff_memory_distill(expired, slot=slot)
 
-            log(f"<- [{'NEW' if is_new else 'CONT'} {session_id[:8]} slot={slot}] {user_prompt[:200]}")
+            log(f"<- [{'NEW' if is_new else 'CONT'} {session_id[:8]} slot={slot} model={model}] {user_prompt[:200]}")
             send_typing(token, chat_id)
 
             if slot != DEFAULT_SLOT:
@@ -608,7 +618,7 @@ def main() -> int:
             else:
                 full_prompt = user_prompt
 
-            reply = ask_claude(full_prompt, session_id, is_new, slot=slot)
+            reply = ask_claude(full_prompt, session_id, is_new, slot=slot, model=model)
             log(f"-> {reply[:200]}")
 
             if slot != DEFAULT_SLOT:
