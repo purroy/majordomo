@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -140,8 +141,15 @@ def run_claude(
     Returns (returncode, stdout, stderr). Maps timeout → 124 and missing CLI
     → 127 so callers can branch without catching exceptions.
     """
+    # Resolve the binary explicitly: cron runs with a minimal PATH that
+    # does not include /usr/local/bin, where the CLI lives on the server.
+    claude_bin = (
+        shutil.which("claude")
+        or next((p for p in ("/usr/local/bin/claude", "/usr/bin/claude")
+                 if Path(p).exists()), "claude")
+    )
     cmd = [
-        "claude", "--print",
+        claude_bin, "--print",
         "--model", model,
         "--session-id", str(uuid.uuid4()),
         "--no-session-persistence",
