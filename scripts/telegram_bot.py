@@ -534,7 +534,10 @@ def handle_callback(token: str, allowed_chat: int, state: dict,
     log(f"<- [callback] {data}")
 
     if data == "noop":
-        tg_api.answer_callback(token, cb_id)
+        # Inert button (already-actioned keyboards, test buttons). Answer
+        # with a visible toast — an empty ack only stops the spinner and
+        # looks like the button is dead.
+        tg_api.answer_callback(token, cb_id, "✅ Callback recibido")
         return
 
     parts = data.split(":")
