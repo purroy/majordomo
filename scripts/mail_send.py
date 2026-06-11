@@ -21,7 +21,14 @@ from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
 from pathlib import Path
 
-from _mail import MailConfig, fetch_message, imap_connect, select_folder, smtp_connect
+from _mail import (
+    MailConfig,
+    add_flags,
+    fetch_message,
+    imap_connect,
+    select_folder,
+    smtp_connect,
+)
 
 DRAFTS = Path(__file__).resolve().parent.parent / "drafts"
 
@@ -118,6 +125,23 @@ def main() -> int:
     finally:
         smtp.quit()
     print(f"SENT {msg['Message-ID']}")
+
+    # Best-effort: flag the original as \Answered so watchers and digests
+    # can tell this thread no longer awaits a reply. Never fails the send.
+    if args.in_reply_to:
+        try:
+            conn = imap_connect(cfg)
+            try:
+                select_folder(conn, args.folder)
+                add_flags(conn, int(args.in_reply_to), ["\\Answered"])
+            finally:
+                try:
+                    conn.logout()
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"WARN: could not flag UID {args.in_reply_to} as answered: {e}",
+                  file=sys.stderr)
     return 0
 
 

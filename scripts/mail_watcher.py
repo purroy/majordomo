@@ -53,6 +53,11 @@ from watcher_base import (
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 STATE = REPO_DIR / ".mail_watch_state.json"
+# IMPORTANT items pending the 4h digest live in their own append-only file,
+# NOT inside STATE: the watcher holds its loaded state for minutes (Claude
+# call) and a full-state rewrite would resurrect items mail_summary.py had
+# already drained in between.
+PENDING = REPO_DIR / ".mail_pending_important.txt"
 log = Logger(REPO_DIR / "briefings" / "mail_watcher.log")
 
 CLAUDE_TIMEOUT_S = 240
@@ -113,6 +118,17 @@ def format_triage_lines_html(lines: list[str], header: str) -> str:
         for s in unmatched:
             out.append(f"<code>{html_escape(s)}</code>")
     return "\n".join(out)
+
+
+def queue_important(lines: list[str]) -> None:
+    """Append IMPORTANT triage lines to the pending-digest queue.
+
+    Plain O_APPEND writes: no read-modify-write, so a concurrent drain by
+    mail_summary.py can never lose or resurrect items.
+    """
+    with open(PENDING, "a", encoding="utf-8") as fh:
+        for line in lines:
+            fh.write(line.rstrip("\n") + "\n")
 
 
 # --- Noise pre-filter -------------------------------------------------------
@@ -261,6 +277,15 @@ def main() -> int:
 
     state = load_json(STATE, {"accounts": {}})
 
+    # One-time migration: pending_important used to live inside STATE. Move
+    # any leftovers to the queue file and drop the key so later full-state
+    # writes can never carry a stale copy.
+    legacy = state.pop("pending_important", None)
+    if legacy:
+        queue_important(legacy)
+        atomic_write_json(STATE, state)
+        log(f"migrated {len(legacy)} legacy pending IMPORTANT to {PENDING.name}")
+
     # Manual recovery mode: reset last_uid for one account so the next real
     # run replays from UID. Useful after fixing a classification prompt.
     if args.reprocess_since is not None:
@@ -364,9 +389,7 @@ def main() -> int:
         log(f"no urgent items (FIRE/SUSPICIOUS)")
 
     if important:
-        pending = state.setdefault("pending_important", [])
-        pending.extend(important)
-        atomic_write_json(STATE, state)
+        queue_important(important)
         log(f"queued {len(important)} IMPORTANT for 4h summary")
 
     return 0

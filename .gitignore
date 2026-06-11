@@ -6,6 +6,8 @@ archive/
 
 # Watcher / bot state
 .mail_watch_state.json
+.mail_pending_important.txt
+.mail_pending_important.txt.draining
 .slack_watch_state.json
 .telegram_state.json
 .pa_snooze.json

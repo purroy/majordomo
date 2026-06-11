@@ -239,6 +239,43 @@ def fetch_envelope(
     return out
 
 
+def fetch_flags(
+    conn: imaplib.IMAP4_SSL, uids: Iterable[int]
+) -> dict[int, set[str]]:
+    """Return {uid: flags} for the given UIDs in one batched FETCH.
+
+    UIDs absent from the result no longer exist in the selected folder
+    (expunged or moved away).
+    """
+    uids = list(uids)
+    out: dict[int, set[str]] = {}
+    if not uids:
+        return out
+    typ, data = conn.uid("FETCH", ",".join(str(u) for u in uids), "(FLAGS)")
+    if typ != "OK":
+        raise RuntimeError(f"FETCH FLAGS failed: {data!r}")
+    for item in data or []:
+        if isinstance(item, tuple):
+            item = item[0]
+        if not isinstance(item, bytes):
+            continue
+        m_uid = re.search(rb"UID (\d+)", item)
+        m_flags = re.search(rb"FLAGS \(([^)]*)\)", item)
+        if not m_uid or not m_flags:
+            continue
+        out[int(m_uid.group(1))] = {
+            f.decode() for f in m_flags.group(1).split()
+        }
+    return out
+
+
+def add_flags(conn: imaplib.IMAP4_SSL, uid: int, flags: Iterable[str]) -> None:
+    """Add IMAP flags (e.g. \\Answered) to a message without touching others."""
+    typ, data = conn.uid("STORE", str(uid), "+FLAGS", "(" + " ".join(flags) + ")")
+    if typ != "OK":
+        raise RuntimeError(f"STORE +FLAGS on UID {uid} failed: {data!r}")
+
+
 def text_body(msg: email.message.EmailMessage) -> str:
     """Best-effort text extraction. Prefers text/plain, falls back to HTML→text."""
     if msg.is_multipart():
