@@ -43,7 +43,22 @@ chat  = os.environ["PA_TG_CHAT"]
 mode  = os.environ["PA_TG_MODE"]
 text  = os.environ["PA_TG_TEXT"].rstrip("\n")
 CHUNK = 4000
-chunks = [text[i:i+CHUNK] for i in range(0, len(text), CHUNK)] or [""]
+# Split at line boundaries: digests put each HTML element on its own line
+# with balanced tags, and a mid-tag split makes Telegram reject the chunk
+# with HTTP 400 when parse_mode=HTML.
+chunks, cur = [], ""
+for ln in text.split("\n"):
+    while len(ln) > CHUNK:  # pathological single line: hard split
+        if cur:
+            chunks.append(cur); cur = ""
+        chunks.append(ln[:CHUNK]); ln = ln[CHUNK:]
+    if cur and len(cur) + 1 + len(ln) > CHUNK:
+        chunks.append(cur); cur = ln
+    else:
+        cur = f"{cur}\n{ln}" if cur else ln
+if cur:
+    chunks.append(cur)
+chunks = chunks or [""]
 for ch in chunks:
     data = {"chat_id": chat, "text": ch, "disable_web_page_preview": "true"}
     if mode:
