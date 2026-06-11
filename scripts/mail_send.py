@@ -24,7 +24,9 @@ from pathlib import Path
 from _mail import (
     MailConfig,
     add_flags,
+    append_message,
     fetch_message,
+    get_secret,
     imap_connect,
     select_folder,
     smtp_connect,
@@ -126,22 +128,36 @@ def main() -> int:
         smtp.quit()
     print(f"SENT {msg['Message-ID']}")
 
-    # Best-effort: flag the original as \Answered so watchers and digests
-    # can tell this thread no longer awaits a reply. Never fails the send.
-    if args.in_reply_to:
+    # Post-send IMAP bookkeeping. Best-effort: the mail is already out, so
+    # failures here warn but never change the exit code.
+    #   - Save a copy to the Sent folder (SMTP does not; without this the
+    #     message would exist only in the recipients' inboxes).
+    #   - Flag the replied-to original as \Answered so watchers and digests
+    #     can tell the thread no longer awaits a reply.
+    sent_folder = get_secret(f"mail-{args.account}-sent-folder", default="Sent")
+    try:
+        conn = imap_connect(cfg)
         try:
-            conn = imap_connect(cfg)
             try:
-                select_folder(conn, args.folder)
-                add_flags(conn, int(args.in_reply_to), ["\\Answered"])
-            finally:
+                append_message(conn, sent_folder, msg)
+                print(f"SAVED copy to {sent_folder}")
+            except Exception as e:
+                print(f"WARN: could not save copy to {sent_folder}: {e}",
+                      file=sys.stderr)
+            if args.in_reply_to:
                 try:
-                    conn.logout()
-                except Exception:
-                    pass
-        except Exception as e:
-            print(f"WARN: could not flag UID {args.in_reply_to} as answered: {e}",
-                  file=sys.stderr)
+                    select_folder(conn, args.folder)
+                    add_flags(conn, int(args.in_reply_to), ["\\Answered"])
+                except Exception as e:
+                    print(f"WARN: could not flag UID {args.in_reply_to} "
+                          f"as answered: {e}", file=sys.stderr)
+        finally:
+            try:
+                conn.logout()
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"WARN: post-send IMAP bookkeeping failed: {e}", file=sys.stderr)
     return 0
 
 

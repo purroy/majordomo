@@ -269,6 +269,29 @@ def fetch_flags(
     return out
 
 
+def append_message(
+    conn: imaplib.IMAP4_SSL,
+    folder: str,
+    msg: EmailMessage,
+    flags: str = r"(\Seen)",
+    when: float | None = None,
+) -> None:
+    """APPEND a copy of msg to folder (created if missing).
+
+    SMTP does not store sent mail anywhere — saving to the Sent folder is
+    the client's job, and this is how.
+    """
+    import time as _time
+    conn.create(_quote_folder(folder))  # returns NO if it exists; ignore
+    typ, data = conn.append(
+        _quote_folder(folder), flags,
+        imaplib.Time2Internaldate(when if when is not None else _time.time()),
+        bytes(msg),
+    )
+    if typ != "OK":
+        raise RuntimeError(f"APPEND to {folder} failed: {data!r}")
+
+
 def add_flags(conn: imaplib.IMAP4_SSL, uid: int, flags: Iterable[str]) -> None:
     """Add IMAP flags (e.g. \\Answered) to a message without touching others."""
     typ, data = conn.uid("STORE", str(uid), "+FLAGS", "(" + " ".join(flags) + ")")
