@@ -114,8 +114,10 @@ def main() -> int:
         log(f"claude rc={rc}: {stderr.strip()[:200]}")
         return 1
     out = stdout.strip()
-    if not out or out == "NONE":
-        log("no upcoming external meetings to prep")
+    # Tolerant: the model sometimes explains instead of answering the
+    # literal NONE. No JSON object in the output = nothing to prep.
+    if not out or "{" not in out:
+        log(f"no upcoming external meetings to prep ({out[:120]!r})")
         return 0
     try:
         raw = out[out.index("{"):out.rindex("}") + 1]
