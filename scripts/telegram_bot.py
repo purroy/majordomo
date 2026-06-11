@@ -43,8 +43,9 @@ REPO_DIR = Path(__file__).resolve().parent.parent
 STATE = REPO_DIR / ".telegram_state.json"
 
 sys.path.insert(0, str(REPO_DIR / "scripts"))
+import telegram_api as tg_api
 from _mail import get_secret  # side effect: auto-loads .env
-from watcher_base import Logger, atomic_write_json, load_json
+from watcher_base import Logger, atomic_write_json, html_escape, load_json
 try:
     from md_to_telegram import convert as md_to_text
 except ImportError:
@@ -389,6 +390,281 @@ def ask_claude(
     return (out.stdout or "").strip() or "(sin respuesta)"
 
 
+# --- Inline-button callbacks -------------------------------------------------
+#
+# Watchers attach inline keyboards to their pushes (digest, follow-ups,
+# triage proposals). The callback_data protocol, kept under Telegram's
+# 64-byte limit:
+#
+#   m:arch:<acc>:<uid>   archive an INBOX mail (mail_flag.py)
+#   m:sno:<acc>:<uid>    snooze an INBOX mail 3 days
+#   m:rep:<acc>:<uid>    draft a reply via the Claude default session
+#   m:send:<acc>:<uid>   send the draft at /tmp/pa_reply_<uid>.txt
+#   g:arch|sno|rep:<key> same, over a digest topic group (.digest_actions.json)
+#   f:fup:<acc>:<uid>    draft a follow-up for a Sent mail
+#   f:send:<acc>:<uid>   send the follow-up draft at /tmp/pa_fup_<uid>.txt
+#   f:dis:<acc>:<uid>    follow-up nudge: mark resolved, stop nudging
+#   f:lat:<acc>:<uid>    follow-up nudge: remind again in 3 days
+#   t:mute:<idx>         triage proposal: add pattern to noise_filters.local.txt
+#   t:keep:<idx>         triage proposal: reject
+#   noop                 inert (used to "disable" a pressed keyboard)
+#
+# Button presses that send mail count as the explicit confirmation required
+# by CLAUDE.md: one press authorises exactly one send.
+
+DIGEST_ACTIONS = REPO_DIR / ".digest_actions.json"
+TRIAGE_PROPOSALS = REPO_DIR / ".triage_proposals.json"
+NOISE_LOCAL = REPO_DIR / "scripts" / "noise_filters.local.txt"
+
+REPLY_DRAFT_PROMPT = (
+    "[Acción desde botón de Telegram] Redacta un borrador de respuesta al "
+    "correo {acc}/{uid}: léelo con `python3 scripts/mail_read.py {uid} "
+    "--account {acc}`, escribe el borrador en /tmp/pa_reply_{uid}.txt en el "
+    "idioma del original y muéstralo entero tal cual. NO lo envíes: el envío "
+    "se confirma con otro botón."
+)
+REPLY_SEND_PROMPT = (
+    "[Confirmación por botón de Telegram] El owner ha pulsado «Enviar» para "
+    "el borrador del correo {acc}/{uid}. Esa pulsación es la confirmación "
+    "explícita para ESTE envío y solo este. Envíalo con `python3 "
+    "scripts/mail_send.py --account {acc} --in-reply-to {uid} --body-file "
+    "/tmp/pa_reply_{uid}.txt --yes --to <remitente del original>`. Si "
+    "/tmp/pa_reply_{uid}.txt no existe, dilo y no envíes nada."
+)
+FOLLOWUP_DRAFT_PROMPT = (
+    "[Acción desde botón de Telegram] Prepara un follow-up del correo que el "
+    "owner ENVIÓ y sigue sin respuesta: {acc}/{uid} en la carpeta Sent. "
+    "Léelo con `python3 scripts/mail_read.py {uid} --account {acc} --folder "
+    "Sent`. Escribe un follow-up breve (2-4 frases, idioma del original, sin "
+    "reproches) en /tmp/pa_fup_{uid}.txt y muéstralo entero. NO lo envíes: "
+    "el envío se confirma con otro botón."
+)
+FOLLOWUP_SEND_PROMPT = (
+    "[Confirmación por botón de Telegram] El owner ha pulsado «Enviar» para "
+    "el follow-up de {acc}/{uid} (carpeta Sent). Esa pulsación es la "
+    "confirmación explícita para ESTE envío y solo este. Envíalo con "
+    "`python3 scripts/mail_send.py --account {acc} --in-reply-to {uid} "
+    "--folder Sent --body-file /tmp/pa_fup_{uid}.txt --yes --to "
+    "<destinatario del correo original de Sent>`. Si /tmp/pa_fup_{uid}.txt "
+    "no existe, dilo y no envíes nada."
+)
+
+
+def run_mail_flag(acc: str, uid: str, *flag_args: str) -> tuple[bool, str]:
+    """Run mail_flag.py synchronously. Returns (ok, short error)."""
+    try:
+        res = subprocess.run(
+            ["python3", str(REPO_DIR / "scripts" / "mail_flag.py"),
+             uid, "--account", acc, *flag_args],
+            capture_output=True, text=True, timeout=90,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "timeout"
+    return res.returncode == 0, (res.stderr or res.stdout).strip()[:200]
+
+
+def run_via_default_session(token: str, chat_id: int, state: dict,
+                            prompt: str,
+                            reply_buttons: list | None = None) -> None:
+    """Route a button action through the default-slot Claude session.
+
+    Mirrors the message flow (session reuse, TTL rollover, zombie-session
+    self-heal) so the button conversation and the typed conversation share
+    one context — pressing «Responder» and then typing tweaks works.
+    """
+    session_id, is_new, expired = session_for_slot(state, chat_id, DEFAULT_SLOT)
+    atomic_write_json(STATE, state)
+    if expired:
+        kickoff_memory_distill(expired, slot=DEFAULT_SLOT)
+    send_typing(token, chat_id)
+    reply = ask_claude(prompt, session_id, is_new)
+    session_dead = (
+        "No conversation found with session ID" in reply
+        or (is_new and reply.startswith("⚠ claude rc="))
+    )
+    if session_dead:
+        reset_slot(state, chat_id, DEFAULT_SLOT)
+        atomic_write_json(STATE, state)
+        session_id, is_new, _ = session_for_slot(state, chat_id, DEFAULT_SLOT)
+        atomic_write_json(STATE, state)
+        reply = ask_claude(prompt, session_id, is_new)
+    log(f"-> [callback] {reply[:200]}")
+    text = html_escape(md_to_text(reply))
+    if reply_buttons:
+        tg_api.send_html(text, buttons=reply_buttons, token=token,
+                         chat_id=chat_id, log=log)
+    else:
+        tg_api.send_html(text, token=token, chat_id=chat_id, log=log)
+    touch_slot(state, chat_id, DEFAULT_SLOT)
+
+
+def _disable_keyboard(token: str, cb_msg: dict, label: str) -> None:
+    """Replace the pressed keyboard with a single inert status button."""
+    chat_id = (cb_msg.get("chat") or {}).get("id")
+    message_id = cb_msg.get("message_id")
+    if chat_id is None or message_id is None:
+        return
+    try:
+        tg_api.call(token, "editMessageReplyMarkup", {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "reply_markup": tg_api.keyboard([[(label, "noop")]]),
+        })
+    except Exception:
+        pass
+
+
+def _slots_for_group(key: str) -> tuple[list[str], str | None]:
+    """Resolve a digest group key to (all acc/uid slots, head slot)."""
+    actions = load_json(DIGEST_ACTIONS, {})
+    entry = actions.get(key) or {}
+    return entry.get("uids", []), entry.get("head")
+
+
+def handle_callback(token: str, allowed_chat: int, state: dict,
+                    cb: dict) -> None:
+    cb_id = cb.get("id", "")
+    data = (cb.get("data") or "").strip()
+    cb_msg = cb.get("message") or {}
+    chat_id = (cb_msg.get("chat") or {}).get("id")
+    if chat_id != allowed_chat:
+        tg_api.answer_callback(token, cb_id)
+        log(f"DROP callback from chat {chat_id}: {data[:60]}")
+        return
+    log(f"<- [callback] {data}")
+
+    if data == "noop":
+        tg_api.answer_callback(token, cb_id)
+        return
+
+    parts = data.split(":")
+    kind = parts[0]
+
+    # --- direct IMAP actions (fast) -----------------------------------------
+    if kind == "m" and len(parts) == 4 and parts[1] in ("arch", "sno"):
+        _, action, acc, uid = parts
+        flag_args = (["--action", "archive"] if action == "arch"
+                     else ["--action", "snooze", "--days", "3"])
+        ok, err = run_mail_flag(acc, uid, *flag_args)
+        done = "📥 Archivado" if action == "arch" else "⏰ Pospuesto 3 días"
+        tg_api.answer_callback(token, cb_id, done if ok else f"⚠ {err[:150]}")
+        if ok:
+            _disable_keyboard(token, cb_msg, f"{done} · {acc}/{uid}")
+        return
+
+    if kind == "g" and len(parts) == 3:
+        _, action, key = parts
+        slots, head = _slots_for_group(key)
+        if not slots:
+            tg_api.answer_callback(token, cb_id, "⚠ Grupo caducado; usa /reply")
+            return
+        if action in ("arch", "sno"):
+            flag_args = (["--action", "archive"] if action == "arch"
+                         else ["--action", "snooze", "--days", "3"])
+            failed = []
+            for slot in slots:
+                acc, _, uid = slot.rpartition("/")
+                ok, _err = run_mail_flag(acc, uid, *flag_args)
+                if not ok:
+                    failed.append(slot)
+            done = "📥 Archivado" if action == "arch" else "⏰ Pospuesto 3 días"
+            if failed:
+                tg_api.answer_callback(
+                    token, cb_id, f"⚠ Fallaron {len(failed)}/{len(slots)}")
+            else:
+                tg_api.answer_callback(token, cb_id, f"{done} ({len(slots)})")
+                _disable_keyboard(token, cb_msg, f"{done} · {len(slots)} correos")
+            return
+        if action == "rep":
+            target = head or slots[0]
+            acc, _, uid = target.rpartition("/")
+            tg_api.answer_callback(token, cb_id, "Redactando borrador…")
+            run_via_default_session(
+                token, chat_id, state,
+                REPLY_DRAFT_PROMPT.format(acc=acc, uid=uid),
+                reply_buttons=[[("📤 Enviar", f"m:send:{acc}:{uid}")]],
+            )
+            return
+
+    # --- Claude-routed actions (slow: draft / send) -------------------------
+    if kind == "m" and len(parts) == 4 and parts[1] in ("rep", "send"):
+        _, action, acc, uid = parts
+        if action == "rep":
+            tg_api.answer_callback(token, cb_id, "Redactando borrador…")
+            run_via_default_session(
+                token, chat_id, state,
+                REPLY_DRAFT_PROMPT.format(acc=acc, uid=uid),
+                reply_buttons=[[("📤 Enviar", f"m:send:{acc}:{uid}")]],
+            )
+        else:
+            tg_api.answer_callback(token, cb_id, "Enviando…")
+            _disable_keyboard(token, cb_msg, f"📤 Envío confirmado · {acc}/{uid}")
+            run_via_default_session(
+                token, chat_id, state,
+                REPLY_SEND_PROMPT.format(acc=acc, uid=uid),
+            )
+        return
+
+    if kind == "f" and len(parts) == 4:
+        _, action, acc, uid = parts
+        if action == "fup":
+            tg_api.answer_callback(token, cb_id, "Redactando follow-up…")
+            run_via_default_session(
+                token, chat_id, state,
+                FOLLOWUP_DRAFT_PROMPT.format(acc=acc, uid=uid),
+                reply_buttons=[[("📤 Enviar", f"f:send:{acc}:{uid}")]],
+            )
+        elif action == "send":
+            tg_api.answer_callback(token, cb_id, "Enviando…")
+            _disable_keyboard(token, cb_msg, f"📤 Envío confirmado · {acc}/{uid}")
+            run_via_default_session(
+                token, chat_id, state,
+                FOLLOWUP_SEND_PROMPT.format(acc=acc, uid=uid),
+            )
+        elif action in ("dis", "lat"):
+            try:
+                import followup_watcher as fw
+                if action == "dis":
+                    fw.mark_by_uid(acc, uid, "dismissed")
+                    tg_api.answer_callback(token, cb_id, "✅ Marcado resuelto")
+                    _disable_keyboard(token, cb_msg, f"✅ Resuelto · {acc}/{uid}")
+                else:
+                    fw.mark_by_uid(acc, uid, "later", days=3)
+                    tg_api.answer_callback(token, cb_id, "⏰ Te lo recuerdo en 3 días")
+                    _disable_keyboard(token, cb_msg, f"⏰ +3 días · {acc}/{uid}")
+            except Exception as e:
+                log(f"followup mark failed: {e}")
+                tg_api.answer_callback(token, cb_id, "⚠ Error guardando estado")
+        return
+
+    if kind == "t" and len(parts) == 3 and parts[1] in ("mute", "keep"):
+        _, action, idx = parts
+        proposals = load_json(TRIAGE_PROPOSALS, {})
+        prop = proposals.get(idx)
+        if not prop:
+            tg_api.answer_callback(token, cb_id, "⚠ Propuesta caducada")
+            return
+        if action == "mute":
+            try:
+                with open(NOISE_LOCAL, "a", encoding="utf-8") as fh:
+                    fh.write(f"# triage_learn {time.strftime('%Y-%m-%d')}: "
+                             f"{prop.get('label', '')}\n{prop['pattern']}\n")
+                tg_api.answer_callback(token, cb_id, "🔇 Silenciado")
+                _disable_keyboard(token, cb_msg,
+                                  f"🔇 Silenciado · {prop.get('label', '')[:40]}")
+            except Exception as e:
+                log(f"noise filter append failed: {e}")
+                tg_api.answer_callback(token, cb_id, "⚠ Error escribiendo filtro")
+        else:
+            tg_api.answer_callback(token, cb_id, "Mantengo el remitente")
+            _disable_keyboard(token, cb_msg,
+                              f"👁 Se mantiene · {prop.get('label', '')[:40]}")
+        return
+
+    tg_api.answer_callback(token, cb_id, "⚠ Acción desconocida")
+    log(f"unknown callback data: {data[:60]}")
+
+
 def main() -> int:
     try:
         token = get_secret("telegram-bot-token")
@@ -414,7 +690,7 @@ def main() -> int:
             resp = tg(token, "getUpdates", {
                 "offset": state["offset"] + 1,
                 "timeout": POLL_TIMEOUT_S,
-                "allowed_updates": json.dumps(["message"]),
+                "allowed_updates": json.dumps(["message", "callback_query"]),
             }, timeout=HTTP_TIMEOUT_S)
             backoff = BACKOFF_START_S  # reset on success
         except Exception as e:
@@ -431,6 +707,17 @@ def main() -> int:
 
         for update in resp.get("result", []):
             update_id = update["update_id"]
+
+            cb = update.get("callback_query")
+            if cb:
+                try:
+                    handle_callback(token, allowed_chat, state, cb)
+                except Exception as e:
+                    log(f"callback handler error: {e}")
+                    tg_api.answer_callback(token, cb.get("id", ""))
+                state["offset"] = update_id
+                atomic_write_json(STATE, state)
+                continue
 
             msg = update.get("message") or update.get("edited_message")
             if not msg:

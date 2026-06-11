@@ -26,6 +26,7 @@ Special modes:
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import socket
 import sys
@@ -58,6 +59,11 @@ STATE = REPO_DIR / ".mail_watch_state.json"
 # call) and a full-state rewrite would resurrect items mail_summary.py had
 # already drained in between.
 PENDING = REPO_DIR / ".mail_pending_important.txt"
+# Sidecar with the real From/Subject of every item sent to triage, keyed by
+# account/uid. mail_summary joins it when logging outcomes and triage_learn
+# aggregates outcomes by real sender (the triage lines only carry Claude's
+# freeform sender text, which varies run to run).
+META = REPO_DIR / ".mail_meta.jsonl"
 log = Logger(REPO_DIR / "briefings" / "mail_watcher.log")
 
 CLAUDE_TIMEOUT_S = 240
@@ -118,6 +124,34 @@ def format_triage_lines_html(lines: list[str], header: str) -> str:
         for s in unmatched:
             out.append(f"<code>{html_escape(s)}</code>")
     return "\n".join(out)
+
+
+def append_meta(items: list[dict]) -> None:
+    """Record (account, uid) → real From/Subject for later outcome analysis."""
+    stamp = time.strftime("%Y-%m-%d")
+    with open(META, "a", encoding="utf-8") as fh:
+        for it in items:
+            fh.write(json.dumps({
+                "ts": stamp,
+                "account": it["account"],
+                "uid": it["uid"],
+                "from": it["from"],
+                "subject": it["subject"],
+            }, ensure_ascii=False) + "\n")
+
+
+def load_meta() -> dict[tuple[str, int], dict]:
+    """Return {(account, uid): meta} from the sidecar (last entry wins)."""
+    out: dict[tuple[str, int], dict] = {}
+    if not META.exists():
+        return out
+    for raw in META.read_text(encoding="utf-8").splitlines():
+        try:
+            m = json.loads(raw)
+            out[(m["account"], int(m["uid"]))] = m
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+            continue
+    return out
 
 
 def queue_important(lines: list[str]) -> None:
@@ -361,6 +395,7 @@ def main() -> int:
         log(f"[dry-run] would triage {len(all_new)} items: {[(i['account'], i['uid']) for i in all_new]}")
         return 0
 
+    append_meta(all_new)
     rc, stdout, stderr = run_claude(build_prompt(all_new), timeout=CLAUDE_TIMEOUT_S)
     output = stdout.strip()
 

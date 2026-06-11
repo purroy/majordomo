@@ -59,6 +59,19 @@ When the owner asks about goals, objectives, rocks, EOS, monthly commitments, an
 
 Under the hood: `scripts/goals.py` (CLI), `scripts/goals_watcher.py` (Telegram nudges: Monday check-in, Friday retro, deadlines, revenue, quarter end). `/morning` and `/evening` include goals sections automatically when the file is present.
 
+## Proactive watchers (server)
+
+Besides the mail/slack/goals watchers, three proactive layers run via cron and push to Telegram with **inline action buttons** (handled by `telegram_bot.py` callbacks; a button press that sends mail IS the explicit confirmation — one press, one send):
+
+- **4h digest** (`mail_summary.py`) — drops items already handled (replied/archived/deleted, checked against IMAP), then pushes: per-item messages with [Responder/+3d/Archivar] buttons for small digests, Claude-grouped topic messages for 4-30 items, flat text beyond that. Logs per-item outcomes to `.triage_outcomes.jsonl`.
+- **Follow-ups** (`followup_watcher.py`, daily) — sent mail without a reply after `PA_FOLLOWUP_DAYS` (default 4) gets a nudge with [Follow-up/Resuelto/+3 días] buttons. State in `.followup_state.json` keyed by Message-ID; one nudge per thread.
+- **Triage learning** (`triage_learn.py`, weekly) — senders the owner systematically archives without answering get a mute proposal with [Silenciar/Mantener] buttons; Silenciar appends to `scripts/noise_filters.local.txt`. Nothing is ever muted automatically.
+- **Meeting prep** (`meeting_prep.py`, every 30 min in work hours) — external meetings starting in 60-100 min get a dossier (last mails with attendees, open follow-ups, related goals) pushed beforehand.
+
+Button protocol and prompts live in `telegram_bot.py` (`handle_callback`); shared send/keyboard helpers in `telegram_api.py`.
+
+**Memory sync**: `scripts/memory_sync.sh` (run from the Mac) converges the Mac and server memory dirs two-way (newest file wins, `MEMORY.md` merged by entry). Config via `PA_SYNC_*` in `.env`. Run it after creating/editing memories.
+
 ## Working in projects under ~/Dev/ (optional layer)
 
 The bot can be extended with a routing layer that lets the owner switch into a project under `~/Dev/` and edit its code through `/proj` commands. This layer ships in a separate private repo (it hardcodes owner-specific project names and hostnames) and is opt-in: set `PA_PROJECT_ROUTER_ENABLED=1` and make `project_router.py` importable from the bot. When the module is not present, every message goes to the default chat exactly as before.

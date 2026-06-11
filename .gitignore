@@ -8,11 +8,19 @@ archive/
 .mail_watch_state.json
 .mail_pending_important.txt
 .mail_pending_important.txt.draining
+.mail_meta.jsonl
 .slack_watch_state.json
 .telegram_state.json
 .pa_snooze.json
 .goals_watch_state.json
+.followup_state.json
+.triage_outcomes.jsonl
+.triage_proposals.json
+.triage_learn_state.json
+.digest_actions.json
+.meeting_prep_state.json
 *.json.tmp
+*.jsonl.tmp
 
 # Personal goals file (EOS tracker). Use goals.example.md as template.
 goals.local.md
