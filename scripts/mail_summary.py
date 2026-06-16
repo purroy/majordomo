@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from collections import defaultdict
@@ -213,21 +214,62 @@ def item_html(it: dict) -> str:
     )
 
 
-def item_buttons(slot: str) -> list[list[tuple[str, str]]]:
+# Senders that never expect a human reply: platform notifications, server
+# monitoring, cron/daemon traffic, bounces. Offering "Responder" on these is
+# noise — the reply would bounce off a no-reply box or a system account. We
+# match the local-part of the From address (and the freeform sender text,
+# which sometimes already carries the address) against these prefixes. The
+# negative lookbehind anchors on a word boundary so "macroot@" or "announce@"
+# don't trip "root@"/"bounce@". Conservative on purpose: anything not clearly
+# automated stays replyable, so a real client is never stripped of the button.
+NO_REPLY_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9._%+-])"
+    r"(?:no[-_.]?reply|donotreply|do[-_.]?not[-_.]?reply|"
+    r"notifications?|notify|notic?es|"
+    r"mailer-daemon|mail-daemon|daemon|postmaster|mailer|bounces?|"
+    r"root|cron(?:job|daemon)?|"
+    r"wordpress|wp[-_.]?admin|"
+    r"automated|auto[-_.]?(?:reply|confirm|notify|renew|renewal)|"
+    r"alerts?|monitor(?:ing)?|nagios|zabbix|uptime|healthcheck|health-check)"
+    r"@"
+)
+
+
+def is_replyable(slot: str, sender: str, meta: dict) -> bool:
+    """True unless the sender is a no-reply / automated notification source.
+
+    Checks the real From header (from the watcher's meta sidecar, keyed by
+    account/uid) first, then the freeform sender text as a fallback when the
+    sidecar has no record (older item, truncated META). Fails open: no signal
+    of automation → replyable, so the button is only ever hidden on a clear
+    match.
+    """
     acc, _, uid = slot.rpartition("/")
-    return [[
-        ("✍️ Responder", f"m:rep:{acc}:{uid}"),
-        ("⏰ +3d", f"m:sno:{acc}:{uid}"),
-        ("📥 Archivar", f"m:arch:{acc}:{uid}"),
-    ]]
+    from_header = ""
+    try:
+        from_header = meta.get((acc, int(uid)), {}).get("from", "")
+    except (ValueError, TypeError):
+        pass
+    return not NO_REPLY_RE.search(f"{from_header}\n{sender}")
 
 
-def group_buttons(key: str) -> list[list[tuple[str, str]]]:
-    return [[
-        ("✍️ Responder", f"g:rep:{key}"),
-        ("⏰ +3d", f"g:sno:{key}"),
-        ("📥 Archivar", f"g:arch:{key}"),
-    ]]
+def item_buttons(slot: str, replyable: bool = True) -> list[list[tuple[str, str]]]:
+    acc, _, uid = slot.rpartition("/")
+    row = []
+    if replyable:
+        row.append(("✍️ Responder", f"m:rep:{acc}:{uid}"))
+    row.append(("⏰ +3d", f"m:sno:{acc}:{uid}"))
+    row.append(("📥 Archivar", f"m:arch:{acc}:{uid}"))
+    return [row]
+
+
+def group_buttons(key: str, replyable: bool = True) -> list[list[tuple[str, str]]]:
+    row = []
+    if replyable:
+        row.append(("✍️ Responder", f"g:rep:{key}"))
+    row.append(("⏰ +3d", f"g:sno:{key}"))
+    row.append(("📥 Archivar", f"g:arch:{key}"))
+    return [row]
 
 
 def group_with_claude(items: list[dict]) -> list[dict] | None:
@@ -297,6 +339,7 @@ Reglas:
 def push_grouped(items: list[dict], raw: list[str], groups: list[dict]) -> bool:
     """One header + one message per topic group, with group action buttons."""
     by_slot = {it["slot"]: it for it in items}
+    meta = load_meta()
     run_id = str(int(time.time()))[-6:]
     actions: dict[str, dict] = {}
     ok = tg_api.send_html(
@@ -305,15 +348,26 @@ def push_grouped(items: list[dict], raw: list[str], groups: list[dict]) -> bool:
     )
     for i, g in enumerate(groups):
         key = f"{run_id}.{i}"
-        actions[key] = {"uids": g["slots"], "head": g["head"]}
+        # A group is replyable if any of its mails is; the reply target (head)
+        # must itself be replyable, so re-point it to a replyable slot when the
+        # model picked a no-reply one (e.g. a notification grouped with a real
+        # question).
+        replyable_slots = [s for s in g["slots"]
+                           if is_replyable(s, by_slot[s]["sender"], meta)]
+        head = g["head"]
+        if replyable_slots and head not in replyable_slots:
+            head = replyable_slots[0]
+        actions[key] = {"uids": g["slots"], "head": head}
         lines = [f"<b>📌 {html_escape(g['title'])}</b>"]
         if g["summary"]:
             lines.append(html_escape(g["summary"]))
         for slot in g["slots"]:
             lines.append("")
             lines.append(item_html(by_slot[slot]))
-        ok = tg_api.send_html("\n".join(lines),
-                              buttons=group_buttons(key), log=log) and ok
+        ok = tg_api.send_html(
+            "\n".join(lines),
+            buttons=group_buttons(key, replyable=bool(replyable_slots)),
+            log=log) and ok
     if raw:
         ok = tg_api.send_html(
             "<b>(sin clasificar)</b>\n"
@@ -326,10 +380,13 @@ def push_grouped(items: list[dict], raw: list[str], groups: list[dict]) -> bool:
 
 def push_per_item(items: list[dict], raw: list[str]) -> bool:
     """Small digest: one actionable message per item."""
+    meta = load_meta()
     ok = True
     for it in items:
+        replyable = is_replyable(it["slot"], it["sender"], meta)
         ok = tg_api.send_html(item_html(it),
-                              buttons=item_buttons(it["slot"]), log=log) and ok
+                              buttons=item_buttons(it["slot"], replyable),
+                              log=log) and ok
     if raw:
         ok = tg_api.send_html(
             "<b>(sin clasificar)</b>\n"
