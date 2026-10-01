@@ -89,11 +89,11 @@ def send_html(text: str, buttons: list[list[tuple[str, str]]] | None = None,
 def send_html_ids(text: str,
                   buttons: list[list[tuple[str, str]]] | None = None,
                   *, token: str | None = None, chat_id: int | None = None,
-                  log=None) -> list[int] | None:
+                  log=None, parse_mode: str = "HTML") -> list[int] | None:
     """Like send_html, but return the message_id of every chunk sent.
 
     None if any chunk failed. Callers use the ids to recognise a later
-    reply to one of these messages.
+    reply to one of these messages. `parse_mode=""` sends plain text.
     """
     if token is None or chat_id is None:
         token, chat_id = creds()
@@ -104,9 +104,10 @@ def send_html_ids(text: str,
         params = {
             "chat_id": chat_id,
             "text": ch,
-            "parse_mode": "HTML",
             "disable_web_page_preview": "true",
         }
+        if parse_mode:
+            params["parse_mode"] = parse_mode
         if buttons and i == len(chunks) - 1:
             params["reply_markup"] = keyboard(buttons)
         try:

@@ -292,14 +292,20 @@ def html_escape(s: str) -> str:
 
 
 def push_to_telegram(text: str, *, log=None, parse_mode: str = "HTML") -> int:
-    """Send `text` to the owner's Telegram via `telegram_send.sh`.
+    """Send `text` to the owner's Telegram. Returns 0 on success.
 
     Defaults to HTML parse_mode. Pass parse_mode="" for plain text.
+
+    Goes through telegram_api (Python), not `telegram_send.sh`: the shell
+    script sources .env, and one unquoted value with a space (e.g. a Sent
+    folder called "Sent Messages") made every push fail, health alerts
+    included.
     """
-    res = subprocess.run(
-        ["bash", str(REPO_DIR / "scripts" / "telegram_send.sh"), "-", parse_mode],
-        input=text, text=True, capture_output=True,
-    )
-    if res.returncode != 0 and log:
-        log(f"telegram_send rc={res.returncode}: {res.stderr.strip()[:200]}")
-    return res.returncode
+    import telegram_api as tg_api  # lazy: telegram_api imports _mail
+    try:
+        ok = tg_api.send_html_ids(text, log=log, parse_mode=parse_mode) is not None
+    except Exception as e:  # missing credentials, network
+        if log:
+            log(f"telegram push failed: {e}")
+        return 1
+    return 0 if ok else 1
