@@ -68,7 +68,13 @@ Besides the mail/slack/goals watchers, three proactive layers run via cron and p
 - **Triage learning** (`triage_learn.py`, weekly) — senders the owner systematically archives without answering get a mute proposal with [Silenciar/Mantener] buttons; Silenciar appends to `scripts/noise_filters.local.txt`. Nothing is ever muted automatically.
 - **Meeting prep** (`meeting_prep.py`, every 30 min in work hours) — external meetings starting in 60-100 min get a dossier (last mails with attendees, open follow-ups, related goals) pushed beforehand.
 
-Button protocol and prompts live in `telegram_bot.py` (`handle_callback`); shared send/keyboard helpers in `telegram_api.py`.
+Button protocol lives in `telegram_bot.py` (`handle_callback`); shared send/keyboard helpers in `telegram_api.py`.
+
+**Drafts from buttons** (`mail_draft.py`): [Responder] and [Follow-up] read the mail in Python and ask Claude (Opus) for the text with **no tools**; the bot posts the draft with an [Enviar] button. To change it, the owner replies to the draft message with what to change. [Enviar] is plain code: the recipient comes from the original's headers (Reply-To/From, or To for a follow-up), the body is exactly the text shown, and a second press cannot send twice. Drafts live in `.drafts/` (0700).
+
+**Untrusted mail never reaches a model with tools.** The unattended jobs that read incoming mail (triage, 4h grouping, follow-up classification, drafts) call `run_claude()` with its default `tools=False`: the model can only return text, so a mail that says "send X to Y" cannot make it act. Only `slack_watcher.py` and `meeting_prep.py` pass `tools=True` (they need connectors).
+
+**Health alert**: every `run_claude()` call records its result in `.claude_health.json`. After 3 failures in a row (≈45 min of mail watcher) the owner gets a Telegram warning with the error and the fix (usually: log in to Claude again as the PA user), repeated once a day while it lasts, and a message when it recovers.
 
 **Memory sync**: `scripts/memory_sync.sh` (run from the Mac) converges the Mac and server memory dirs two-way (newest file wins, `MEMORY.md` merged by entry). Config via `PA_SYNC_*` in `.env`. Run it after creating/editing memories.
 

@@ -19,6 +19,10 @@ archive/
 .triage_learn_state.json
 .digest_actions.json
 .meeting_prep_state.json
+.claude_health.json
+
+# Reply / follow-up drafts (private, 0700)
+.drafts/
 *.json.tmp
 *.jsonl.tmp
 

@@ -43,6 +43,7 @@ REPO_DIR = Path(__file__).resolve().parent.parent
 STATE = REPO_DIR / ".telegram_state.json"
 
 sys.path.insert(0, str(REPO_DIR / "scripts"))
+import mail_draft
 import telegram_api as tg_api
 from _mail import get_secret  # side effect: auto-loads .env
 from watcher_base import Logger, atomic_write_json, html_escape, load_json
@@ -398,11 +399,11 @@ def ask_claude(
 #
 #   m:arch:<acc>:<uid>   archive an INBOX mail (mail_flag.py)
 #   m:sno:<acc>:<uid>    snooze an INBOX mail 3 days
-#   m:rep:<acc>:<uid>    draft a reply via the Claude default session
-#   m:send:<acc>:<uid>   send the draft at /tmp/pa_reply_<uid>.txt
+#   m:rep:<acc>:<uid>    draft a reply (mail_draft.make_draft, no tools)
+#   m:send:<acc>:<uid>   send that draft (mail_draft.send_draft, plain code)
 #   g:arch|sno|rep:<key> same, over a digest topic group (.digest_actions.json)
 #   f:fup:<acc>:<uid>    draft a follow-up for a Sent mail
-#   f:send:<acc>:<uid>   send the follow-up draft at /tmp/pa_fup_<uid>.txt
+#   f:send:<acc>:<uid>   send the follow-up draft
 #   f:dis:<acc>:<uid>    follow-up nudge: mark resolved, stop nudging
 #   f:lat:<acc>:<uid>    follow-up nudge: remind again in 3 days
 #   t:mute:<idx>         triage proposal: add pattern to noise_filters.local.txt
@@ -410,44 +411,70 @@ def ask_claude(
 #   noop                 inert (used to "disable" a pressed keyboard)
 #
 # Button presses that send mail count as the explicit confirmation required
-# by CLAUDE.md: one press authorises exactly one send.
+# by CLAUDE.md: one press authorises exactly one send. No model is involved
+# in drafting-with-tools or sending: the draft call has no tools and the
+# send is code that takes the recipient from the original mail's headers.
+# To change a draft, the owner replies to its message (see DRAFT_INDEX).
 
 DIGEST_ACTIONS = REPO_DIR / ".digest_actions.json"
 TRIAGE_PROPOSALS = REPO_DIR / ".triage_proposals.json"
 NOISE_LOCAL = REPO_DIR / "scripts" / "noise_filters.local.txt"
 
-REPLY_DRAFT_PROMPT = (
-    "[Acción desde botón de Telegram] Redacta un borrador de respuesta al "
-    "correo {acc}/{uid}: léelo con `python3 scripts/mail_read.py {uid} "
-    "--account {acc}`, escribe el borrador en /tmp/pa_reply_{uid}.txt en el "
-    "idioma del original y muéstralo entero tal cual. NO lo envíes: el envío "
-    "se confirma con otro botón."
-)
-REPLY_SEND_PROMPT = (
-    "[Confirmación por botón de Telegram] El owner ha pulsado «Enviar» para "
-    "el borrador del correo {acc}/{uid}. Esa pulsación es la confirmación "
-    "explícita para ESTE envío y solo este. Envíalo con `python3 "
-    "scripts/mail_send.py --account {acc} --in-reply-to {uid} --body-file "
-    "/tmp/pa_reply_{uid}.txt --yes --to <remitente del original>`. Si "
-    "/tmp/pa_reply_{uid}.txt no existe, dilo y no envíes nada."
-)
-FOLLOWUP_DRAFT_PROMPT = (
-    "[Acción desde botón de Telegram] Prepara un follow-up del correo que el "
-    "owner ENVIÓ y sigue sin respuesta: {acc}/{uid} en la carpeta Sent. "
-    "Léelo con `python3 scripts/mail_read.py {uid} --account {acc} --folder "
-    "Sent`. Escribe un follow-up breve (2-4 frases, idioma del original, sin "
-    "reproches) en /tmp/pa_fup_{uid}.txt y muéstralo entero. NO lo envíes: "
-    "el envío se confirma con otro botón."
-)
-FOLLOWUP_SEND_PROMPT = (
-    "[Confirmación por botón de Telegram] El owner ha pulsado «Enviar» para "
-    "el follow-up de {acc}/{uid} (carpeta Sent). Esa pulsación es la "
-    "confirmación explícita para ESTE envío y solo este. Envíalo con "
-    "`python3 scripts/mail_send.py --account {acc} --in-reply-to {uid} "
-    "--folder Sent --body-file /tmp/pa_fup_{uid}.txt --yes --to "
-    "<destinatario del correo original de Sent>`. Si /tmp/pa_fup_{uid}.txt "
-    "no existe, dilo y no envíes nada."
-)
+# Telegram message_id → draft, so a reply to a draft message means "change it".
+DRAFT_INDEX = mail_draft.DRAFTS_DIR / "index.json"
+DRAFT_INDEX_KEEP = 200
+SEND_PREFIX = {"reply": "m", "followup": "f"}
+
+
+def present_draft(token: str, chat_id: int, kind: str, acc: str, uid: str,
+                  instructions: str = "") -> None:
+    """Draft (or redraft) and post it with a send button."""
+    send_typing(token, chat_id)
+    try:
+        d = mail_draft.make_draft(kind, acc, uid, instructions)
+    except Exception as e:
+        log(f"draft {kind} {acc}/{uid} failed: {e}")
+        send_message(token, chat_id, f"⚠ No pude preparar el borrador: {e}")
+        return
+    log(f"-> [draft {kind} {acc}/{uid}] {d['body'][:120]!r}")
+    text = (
+        f"<b>✍️ Borrador para</b> {html_escape(', '.join(d['to']))}\n"
+        f"<b>Asunto:</b> {html_escape(d['subject'])}\n\n"
+        f"{html_escape(d['body'])}\n\n"
+        "<i>Para cambiarlo, responde a este mensaje diciendo qué cambiar.</i>"
+    )
+    ids = tg_api.send_html_ids(
+        text, buttons=[[("📤 Enviar", f"{SEND_PREFIX[kind]}:send:{acc}:{uid}")]],
+        token=token, chat_id=chat_id, log=log)
+    if ids:
+        index = load_json(DRAFT_INDEX, {})
+        for mid in ids:
+            index[str(mid)] = {"kind": kind, "account": acc, "uid": str(uid)}
+        if len(index) > DRAFT_INDEX_KEEP:
+            for k in sorted(index, key=int)[:len(index) - DRAFT_INDEX_KEEP]:
+                del index[k]
+        atomic_write_json(DRAFT_INDEX, index)
+
+
+def draft_for_reply(msg: dict) -> dict | None:
+    """The draft a Telegram message replies to, if it replies to one."""
+    replied = msg.get("reply_to_message") or {}
+    mid = replied.get("message_id")
+    if mid is None:
+        return None
+    return load_json(DRAFT_INDEX, {}).get(str(mid))
+
+
+def send_stored_draft(token: str, cb_id: str, cb_msg: dict, kind: str,
+                      acc: str, uid: str) -> None:
+    tg_api.answer_callback(token, cb_id, "Enviando…")
+    ok, note = mail_draft.send_draft(kind, acc, uid)
+    log(f"send {kind} {acc}/{uid}: {note}")
+    if ok:
+        _disable_keyboard(token, cb_msg, f"📤 {note}")
+    else:
+        chat_id = (cb_msg.get("chat") or {}).get("id")
+        send_message(token, chat_id, f"⚠ {note}")
 
 
 def run_mail_flag(acc: str, uid: str, *flag_args: str) -> tuple[bool, str]:
@@ -461,41 +488,6 @@ def run_mail_flag(acc: str, uid: str, *flag_args: str) -> tuple[bool, str]:
     except subprocess.TimeoutExpired:
         return False, "timeout"
     return res.returncode == 0, (res.stderr or res.stdout).strip()[:200]
-
-
-def run_via_default_session(token: str, chat_id: int, state: dict,
-                            prompt: str,
-                            reply_buttons: list | None = None) -> None:
-    """Route a button action through the default-slot Claude session.
-
-    Mirrors the message flow (session reuse, TTL rollover, zombie-session
-    self-heal) so the button conversation and the typed conversation share
-    one context — pressing «Responder» and then typing tweaks works.
-    """
-    session_id, is_new, expired = session_for_slot(state, chat_id, DEFAULT_SLOT)
-    atomic_write_json(STATE, state)
-    if expired:
-        kickoff_memory_distill(expired, slot=DEFAULT_SLOT)
-    send_typing(token, chat_id)
-    reply = ask_claude(prompt, session_id, is_new)
-    session_dead = (
-        "No conversation found with session ID" in reply
-        or (is_new and reply.startswith("⚠ claude rc="))
-    )
-    if session_dead:
-        reset_slot(state, chat_id, DEFAULT_SLOT)
-        atomic_write_json(STATE, state)
-        session_id, is_new, _ = session_for_slot(state, chat_id, DEFAULT_SLOT)
-        atomic_write_json(STATE, state)
-        reply = ask_claude(prompt, session_id, is_new)
-    log(f"-> [callback] {reply[:200]}")
-    text = html_escape(md_to_text(reply))
-    if reply_buttons:
-        tg_api.send_html(text, buttons=reply_buttons, token=token,
-                         chat_id=chat_id, log=log)
-    else:
-        tg_api.send_html(text, token=token, chat_id=chat_id, log=log)
-    touch_slot(state, chat_id, DEFAULT_SLOT)
 
 
 def _disable_keyboard(token: str, cb_msg: dict, label: str) -> None:
@@ -582,48 +574,26 @@ def handle_callback(token: str, allowed_chat: int, state: dict,
             target = head or slots[0]
             acc, _, uid = target.rpartition("/")
             tg_api.answer_callback(token, cb_id, "Redactando borrador…")
-            run_via_default_session(
-                token, chat_id, state,
-                REPLY_DRAFT_PROMPT.format(acc=acc, uid=uid),
-                reply_buttons=[[("📤 Enviar", f"m:send:{acc}:{uid}")]],
-            )
+            present_draft(token, chat_id, "reply", acc, uid)
             return
 
-    # --- Claude-routed actions (slow: draft / send) -------------------------
+    # --- drafts (slow: a model call) and sends ------------------------------
     if kind == "m" and len(parts) == 4 and parts[1] in ("rep", "send"):
         _, action, acc, uid = parts
         if action == "rep":
             tg_api.answer_callback(token, cb_id, "Redactando borrador…")
-            run_via_default_session(
-                token, chat_id, state,
-                REPLY_DRAFT_PROMPT.format(acc=acc, uid=uid),
-                reply_buttons=[[("📤 Enviar", f"m:send:{acc}:{uid}")]],
-            )
+            present_draft(token, chat_id, "reply", acc, uid)
         else:
-            tg_api.answer_callback(token, cb_id, "Enviando…")
-            _disable_keyboard(token, cb_msg, f"📤 Envío confirmado · {acc}/{uid}")
-            run_via_default_session(
-                token, chat_id, state,
-                REPLY_SEND_PROMPT.format(acc=acc, uid=uid),
-            )
+            send_stored_draft(token, cb_id, cb_msg, "reply", acc, uid)
         return
 
     if kind == "f" and len(parts) == 4:
         _, action, acc, uid = parts
         if action == "fup":
             tg_api.answer_callback(token, cb_id, "Redactando follow-up…")
-            run_via_default_session(
-                token, chat_id, state,
-                FOLLOWUP_DRAFT_PROMPT.format(acc=acc, uid=uid),
-                reply_buttons=[[("📤 Enviar", f"f:send:{acc}:{uid}")]],
-            )
+            present_draft(token, chat_id, "followup", acc, uid)
         elif action == "send":
-            tg_api.answer_callback(token, cb_id, "Enviando…")
-            _disable_keyboard(token, cb_msg, f"📤 Envío confirmado · {acc}/{uid}")
-            run_via_default_session(
-                token, chat_id, state,
-                FOLLOWUP_SEND_PROMPT.format(acc=acc, uid=uid),
-            )
+            send_stored_draft(token, cb_id, cb_msg, "followup", acc, uid)
         elif action in ("dis", "lat"):
             try:
                 import followup_watcher as fw
@@ -777,6 +747,16 @@ def main() -> int:
                     state["offset"] = update_id
                     atomic_write_json(STATE, state)
                     continue
+
+            # A reply to a draft message = "change this draft like so".
+            target = draft_for_reply(msg)
+            if target:
+                log(f"<- [redraft {target['kind']} {target['account']}/{target['uid']}] {text[:200]}")
+                present_draft(token, chat_id, target["kind"], target["account"],
+                              target["uid"], instructions=text)
+                state["offset"] = update_id
+                atomic_write_json(STATE, state)
+                continue
 
             if text == "/ping":
                 if send_message(token, chat_id, "pong"):
