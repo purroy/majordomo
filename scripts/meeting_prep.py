@@ -109,6 +109,7 @@ def main() -> int:
     rc, stdout, stderr = run_claude(
         build_prompt(own_domains(), list(prepped)),
         timeout=CLAUDE_TIMEOUT_S,
+        tools=True,  # needs the calendar connector and mail scripts
     )
     if rc != 0:
         log(f"claude rc={rc}: {stderr.strip()[:200]}")

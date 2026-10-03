@@ -82,28 +82,44 @@ def send_html(text: str, buttons: list[list[tuple[str, str]]] | None = None,
 
     Returns True iff every chunk was delivered.
     """
+    return send_html_ids(text, buttons, token=token, chat_id=chat_id,
+                         log=log) is not None
+
+
+def send_html_ids(text: str,
+                  buttons: list[list[tuple[str, str]]] | None = None,
+                  *, token: str | None = None, chat_id: int | None = None,
+                  log=None, parse_mode: str = "HTML") -> list[int] | None:
+    """Like send_html, but return the message_id of every chunk sent.
+
+    None if any chunk failed. Callers use the ids to recognise a later
+    reply to one of these messages. `parse_mode=""` sends plain text.
+    """
     if token is None or chat_id is None:
         token, chat_id = creds()
     chunks = split_at_lines(text)
+    ids: list[int] = []
     ok = True
     for i, ch in enumerate(chunks):
         params = {
             "chat_id": chat_id,
             "text": ch,
-            "parse_mode": "HTML",
             "disable_web_page_preview": "true",
         }
+        if parse_mode:
+            params["parse_mode"] = parse_mode
         if buttons and i == len(chunks) - 1:
             params["reply_markup"] = keyboard(buttons)
         try:
             resp = call(token, "sendMessage", params)
             if not resp.get("ok"):
                 raise RuntimeError(str(resp)[:200])
+            ids.append(int(resp["result"]["message_id"]))
         except Exception as e:
             if log:
                 log(f"telegram_api send_html failed: {e}")
             ok = False
-    return ok
+    return ids if ok else None
 
 
 def answer_callback(token: str, callback_id: str, text: str = "") -> None:

@@ -147,7 +147,8 @@ def main() -> int:
         log("[dry-run] would call claude + push telegram")
         return 0
 
-    rc, stdout, stderr = run_claude(build_prompt(since_iso, user_id), timeout=CLAUDE_TIMEOUT_S)
+    rc, stdout, stderr = run_claude(build_prompt(since_iso, user_id), timeout=CLAUDE_TIMEOUT_S,
+                                    tools=True)  # needs the Slack connector
     output = stdout.strip()
 
     if rc != 0:
