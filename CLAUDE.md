@@ -80,7 +80,7 @@ Button protocol lives in `telegram_bot.py` (`handle_callback`); shared send/keyb
 
 ## Dev jobs (optional private module)
 
-With `PA_DEV_JOBS_ENABLED=1` and a `dev_jobs` module importable from `scripts/`, the bot accepts work requests for projects: `/haz <petición>`, `/jobs`, `/cancel <id>`, [Adelante]/[Cancelar] buttons (`j:go|no:<id>`) and replies to any job message. The bot only drops requests into the module's spool and relays its outbox (drained between long-polls, which shrink to 20 s); the work runs elsewhere, under another Unix user, so the agent that touches code never shares a user with the mail credentials. When the owner asks for project work in plain words, the default chat queues it with `python3 scripts/dev_jobs.py new "<petición literal>"` instead of doing it itself.
+With `PA_DEV_JOBS_ENABLED=1` and a `dev_jobs` module importable from `scripts/`, the bot accepts work requests for projects: `/haz <petición>`, `/jobs`, `/cancel <id>`, [Adelante]/[Cancelar]/[Aplicar en producción] buttons (`j:go|no|prod:<id>`) and replies to any job message. The bot only drops requests into the module's spool and relays its outbox (drained between long-polls, which shrink to 20 s); the work runs elsewhere, under another Unix user, so the agent that touches code never shares a user with the mail credentials. When the owner asks for project work in plain words, the default chat queues it with `python3 scripts/dev_jobs.py new "<petición literal>"` instead of doing it itself.
 
 ## Working in projects under ~/Dev/ (optional layer)
 

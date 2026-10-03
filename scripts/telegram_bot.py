@@ -588,14 +588,16 @@ def handle_callback(token: str, allowed_chat: int, state: dict,
 
     if kind == "j" and len(parts) == 3 and DEV_JOBS_ENABLED:
         _, action, job = parts
-        if action == "go":
-            dj.submit("approve", job)
-            tg_api.answer_callback(token, cb_id, "Adelante")
-            _disable_keyboard(token, cb_msg, f"✅ Aprobado · {job}")
-        elif action == "no":
-            dj.submit("cancel", job)
-            tg_api.answer_callback(token, cb_id, "Cancelado")
-            _disable_keyboard(token, cb_msg, f"✖️ Cancelado · {job}")
+        # j:go → approve the plan · j:no → cancel · j:prod → authorise the one
+        # production action the job proposed (one press, one action).
+        known = {"go": ("approve", "Adelante", "✅ Aprobado"),
+                 "no": ("cancel", "Cancelado", "✖️ Cancelado"),
+                 "prod": ("prod", "Autorizado", "🚀 Producción autorizada")}
+        if action in known:
+            inbox_action, toast, label = known[action]
+            dj.submit(inbox_action, job)
+            tg_api.answer_callback(token, cb_id, toast)
+            _disable_keyboard(token, cb_msg, f"{label} · {job}")
         return
 
     # --- direct IMAP actions (fast) -----------------------------------------
