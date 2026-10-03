@@ -73,6 +73,18 @@ if PROJECT_ROUTER_ENABLED:
 else:
     _pr_import_error = ""
 
+# Dev jobs ("/haz <petición>"): another optional private module. It hands
+# work requests to a separate runner (another Unix user, its own spool) and
+# relays what the runner says. The bot never runs project code itself.
+DEV_JOBS_ENABLED = os.environ.get("PA_DEV_JOBS_ENABLED") == "1"
+dj = None
+if DEV_JOBS_ENABLED:
+    try:
+        import dev_jobs as dj  # noqa: F401
+    except ImportError:
+        DEV_JOBS_ENABLED = False
+JOBS_INDEX = REPO_DIR / ".jobs_index.json"  # Telegram message_id → job id
+
 # Local slot constant so the rest of the bot does not depend on `pr`.
 # Sessions are persisted under `chats[chat_id].sessions[slot]`. Without
 # the router every message lives in the "default" slot.
@@ -80,7 +92,9 @@ DEFAULT_SLOT = "default"
 
 log = Logger(REPO_DIR / "briefings" / "telegram_bot.log")
 
-POLL_TIMEOUT_S = 50
+# Shorter long-poll when dev jobs are on: their outbox is drained between
+# polls, so this bounds how late a job update reaches the owner.
+POLL_TIMEOUT_S = 20 if os.environ.get("PA_DEV_JOBS_ENABLED") == "1" else 50
 HTTP_TIMEOUT_S = POLL_TIMEOUT_S + 15
 CLAUDE_TIMEOUT_S = 600
 CHUNK = 4000  # Telegram message hard limit is 4096
@@ -513,6 +527,43 @@ def _slots_for_group(key: str) -> tuple[list[str], str | None]:
     return entry.get("uids", []), entry.get("head")
 
 
+def deliver_job_updates(token: str, chat_id: int) -> None:
+    """Send what the dev-jobs runner left in its outbox."""
+    if not DEV_JOBS_ENABLED:
+        return
+    try:
+        pending = dj.take_outbox()
+    except OSError as e:
+        log(f"dev jobs outbox unreadable: {e}")
+        return
+    if not pending:
+        return
+    index = load_json(JOBS_INDEX, {})
+    for path, msg in pending:
+        buttons = [[tuple(b) for b in row] for row in msg.get("buttons") or []]
+        ids = tg_api.send_html_ids(msg.get("text", ""), buttons=buttons or None,
+                                   token=token, chat_id=chat_id, log=log)
+        if ids is None:
+            break  # Telegram down: keep the rest for the next loop
+        for mid in ids:
+            index[str(mid)] = msg.get("job", "")
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    if len(index) > 500:
+        for k in sorted(index, key=int)[:len(index) - 500]:
+            del index[k]
+    atomic_write_json(JOBS_INDEX, index)
+
+
+def job_for_reply(msg: dict) -> str:
+    replied = (msg.get("reply_to_message") or {}).get("message_id")
+    if replied is None or not DEV_JOBS_ENABLED:
+        return ""
+    return load_json(JOBS_INDEX, {}).get(str(replied), "")
+
+
 def handle_callback(token: str, allowed_chat: int, state: dict,
                     cb: dict) -> None:
     cb_id = cb.get("id", "")
@@ -534,6 +585,18 @@ def handle_callback(token: str, allowed_chat: int, state: dict,
 
     parts = data.split(":")
     kind = parts[0]
+
+    if kind == "j" and len(parts) == 3 and DEV_JOBS_ENABLED:
+        _, action, job = parts
+        if action == "go":
+            dj.submit("approve", job)
+            tg_api.answer_callback(token, cb_id, "Adelante")
+            _disable_keyboard(token, cb_msg, f"✅ Aprobado · {job}")
+        elif action == "no":
+            dj.submit("cancel", job)
+            tg_api.answer_callback(token, cb_id, "Cancelado")
+            _disable_keyboard(token, cb_msg, f"✖️ Cancelado · {job}")
+        return
 
     # --- direct IMAP actions (fast) -----------------------------------------
     if kind == "m" and len(parts) == 4 and parts[1] in ("arch", "sno"):
@@ -659,6 +722,7 @@ def main() -> int:
     backoff = BACKOFF_START_S
 
     while True:
+        deliver_job_updates(token, allowed_chat)
         try:
             resp = tg(token, "getUpdates", {
                 "offset": state["offset"] + 1,
@@ -747,6 +811,38 @@ def main() -> int:
                     state["offset"] = update_id
                     atomic_write_json(STATE, state)
                     continue
+
+            # Dev jobs: a reply to a job message continues that job; /haz
+            # queues a new one; /jobs lists them; /cancel <id> stops one.
+            reply_job = job_for_reply(msg)
+            low = text.lower()
+            if DEV_JOBS_ENABLED and (reply_job or low.startswith(("/haz", "/jobs", "/cancel"))):
+                if reply_job:
+                    dj.submit("reply", reply_job, text)
+                    note = f"Recibido, se lo paso a {reply_job}."
+                elif low.startswith("/haz"):
+                    request = text[4:].strip()
+                    if request:
+                        dj.submit("new", text=request)
+                        note = "Lo preparo: te confirmo proyecto, tarea y plan en un momento."
+                    else:
+                        note = "Uso: /haz <qué hay que hacer y en qué proyecto>"
+                elif low.startswith("/jobs"):
+                    note = None
+                    send_message(token, chat_id, dj.render_jobs(), parse_mode="HTML")
+                else:
+                    job = text.split()[1] if len(text.split()) > 1 else ""
+                    if job:
+                        dj.submit("cancel", job)
+                        note = f"Cancelo {job}."
+                    else:
+                        note = "Uso: /cancel <id>"
+                if note:
+                    send_message(token, chat_id, note)
+                log(f"<- [jobs] {text[:200]}")
+                state["offset"] = update_id
+                atomic_write_json(STATE, state)
+                continue
 
             # A reply to a draft message = "change this draft like so".
             target = draft_for_reply(msg)

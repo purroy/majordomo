@@ -32,6 +32,11 @@ goals.local.md
 # Log rotation artefacts from watcher_base.Logger
 briefings/*.log.[0-9]*
 
+# Private extensions symlinked in from a separate repo (see CLAUDE.md)
+scripts/project_router.py
+scripts/dev_jobs.py
+.jobs_index.json
+
 # Per-deployment noise filter overlay
 scripts/noise_filters.local.txt
 
